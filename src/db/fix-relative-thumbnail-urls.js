@@ -16,6 +16,21 @@ async function run() {
     process.exit(1)
   }
 
+  // Safety check: if DATABASE_URL points at a non-local database (e.g.
+  // Supabase/Neon in production) but PUBLIC_API_BASE_URL still says
+  // localhost, this script would silently write dev-machine URLs into
+  // production thumbnail_url values — breaking thumbnails for every real
+  // user. Refuse to proceed rather than let that happen by accident.
+  const dbIsLocal = (process.env.DATABASE_URL || '').includes('localhost')
+  const baseIsLocal = base.includes('localhost')
+  if (!dbIsLocal && baseIsLocal) {
+    console.error(
+      `❌ DATABASE_URL points at a non-local database, but PUBLIC_API_BASE_URL is still "${base}".\n` +
+      `   Set PUBLIC_API_BASE_URL to your production backend URL before running this against a remote DB.`
+    )
+    process.exit(1)
+  }
+
   const result = await query(
     `UPDATE resources
      SET thumbnail_url = $1 || '/api/resources/' || id || '/thumbnail'
