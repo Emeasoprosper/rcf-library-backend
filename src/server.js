@@ -1,3 +1,4 @@
+// RCFMOUAULIBRARYreact/rcf-library-backend/src/server.js
 import 'dotenv/config'
 
 // MUST be imported before any route file — this patches Express so that
@@ -64,6 +65,10 @@ app.use(
     // images even though the request itself returns 200 OK — confirmed
     // via net::ERR_BLOCKED_BY_RESPONSE.NotSameOrigin in DevTools.
     crossOriginResourcePolicy: { policy: 'cross-origin' },
+    // Allows the Google Sign-In popup flow to complete its handshake
+    // back to this page via window.postMessage — Helmet's default
+    // Cross-Origin-Opener-Policy (same-origin) blocks that handshake.
+    crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' },
     // frameguard sets X-Frame-Options, which only ever supports ONE
     // value (DENY/SAMEORIGIN) and can't list multiple allowed origins —
     // disabled in favor of the CSP frame-ancestors directive below,
@@ -81,16 +86,27 @@ app.use(
 )
 app.use(cookieParser())
 app.use(express.json({ limit: '2mb' }))
+app.use(express.urlencoded({ extended: true }))
 
-app.use(
+app.use((req, res, next) => {
+  // Google's redirect-mode OAuth POSTs here as a real top-level form
+  // submission from accounts.google.com, not a JS fetch — browsers never
+  // enforce CORS on that kind of request (it's not a fetch/XHR at all),
+  // so this route must bypass our origin allowlist entirely instead of
+  // being rejected the way a cross-origin fetch would be. Without this
+  // bypass, the shared cors() check below rejects the request with an
+  // error (since accounts.google.com is never in FRONTEND_URLS), which
+  // our error handler turns into a 400 — exactly the bug this fixes.
+  if (req.path === '/api/auth/google/redirect-callback') return next()
+
   cors({
     origin: (origin, callback) => {
       if (!origin || allowedOrigins.includes(origin)) return callback(null, true)
       callback(new Error('Not allowed by CORS'))
     },
     credentials: true,
-  })
-)
+  })(req, res, next)
+})
 
 app.use(
   '/api/',

@@ -197,6 +197,52 @@ router.get('/google/callback', async (req, res) => {
   }
 })
 
+// POST /auth/google/redirect-callback — the ux_mode:'redirect' counterpart to
+// POST /auth/google. Google submits the credential as a real HTML form POST
+// here (not a JS fetch), so this can't return JSON — it sets the session
+// cookies then 302-redirects the browser back to the frontend, already
+// signed in. Avoids the whole "Failed to open popup window" failure mode
+// entirely, since no popup is ever opened — the page just navigates.
+router.post('/google/redirect-callback', async (req, res) => {
+  const idToken = req.body?.credential
+  const frontendUrl = (process.env.FRONTEND_URLS || '').split(',')[0]?.trim() || '/'
+
+  if (!idToken) return res.redirect(`${frontendUrl}/signin?error=missing_credential`)
+
+  try {
+    const profile = await verifyGoogleIdToken(idToken)
+
+    const existing = await query('SELECT * FROM users WHERE google_id = $1', [profile.googleId])
+    let user
+
+    if (existing.rows.length > 0) {
+      user = existing.rows[0]
+      await query('UPDATE users SET last_login_at = now(), name = $1, avatar_url = $2 WHERE id = $3',
+        [profile.name, profile.avatarUrl, user.id])
+      user.name = profile.name
+      user.avatar_url = profile.avatarUrl
+    } else {
+      const role = ADMIN_EMAILS.includes(profile.email.toLowerCase()) ? 'admin' : 'student'
+      const inserted = await query(
+        `INSERT INTO users (google_id, email, name, avatar_url, role, last_login_at)
+         VALUES ($1, $2, $3, $4, $5, now()) RETURNING *`,
+        [profile.googleId, profile.email, profile.name, profile.avatarUrl, role]
+      )
+      user = inserted.rows[0]
+    }
+
+    if (user.is_suspended) {
+      return res.redirect(`${frontendUrl}/signin?error=suspended`)
+    }
+
+    await issueSession(res, user, req)
+    res.redirect(`${frontendUrl}/home`)
+  } catch (err) {
+    console.error('Google redirect sign-in failed:', err.message)
+    res.redirect(`${frontendUrl}/signin?error=signin_failed`)
+  }
+})
+
 router.post('/refresh', async (req, res) => {
   const refreshToken = req.cookies?.rcflib_refresh_token
   if (!refreshToken) return res.status(401).json({ error: 'No refresh token' })
