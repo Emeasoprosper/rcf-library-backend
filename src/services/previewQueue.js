@@ -25,7 +25,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { query } from '../db/pool.js'
-import { uploadToStorage } from './storage.js'
+import { uploadToStorage, convertOfficeFileToPdf } from './storage.js'
 import { generateCoverCard } from './coverGenerator.js'
 import { createCanvas } from '@napi-rs/canvas'
 import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist/legacy/build/pdf.mjs'
@@ -316,7 +316,11 @@ async function previewFromVideo(buffer) {
   }
 }
 
-// --- Still a stub — needs LibreOffice on the host, not available here. ---
+// --- REAL implementation: converts to PDF via Drive, then renders page 1
+// the exact same way previewFromPdf already does for real PDF uploads.
+// Covers legacy .doc as well as .docx/.ppt/.pptx — Drive converts all of
+// them the same way, no LibreOffice needed. ---
 async function previewFromOffice(storedFile, mimeType) {
-  throw new Error('previewFromOffice not yet implemented (requires LibreOffice on host)')
+  const pdfBuffer = await convertOfficeFileToPdf(storedFile.fileId, mimeType)
+  return previewFromPdf(pdfBuffer)
 }

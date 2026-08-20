@@ -116,3 +116,43 @@ export async function deleteFromStorage(fileId) {
   const drive = await getDriveClient()
   await drive.files.delete({ fileId, supportsAllDrives: true })
 }
+
+// Converts an already-uploaded Office file (DOC/DOCX/PPT/PPTX) to a real
+// PDF via Google Drive's own conversion — solves the "no LibreOffice on
+// this host" problem using infrastructure we already have (the service
+// account's Drive access). Works identically for legacy .doc, modern
+// .docx, .ppt, and .pptx.
+//
+// How it works: Drive lets you `copy` a file while specifying a
+// different target mimeType — for Office formats, giving it a Google
+// Docs/Slides mimeType makes Drive itself do the format conversion
+// during the copy. `export` on that converted copy then pulls it back
+// out as a real PDF. The temporary converted copy is deleted immediately
+// after, so nothing lingers in Drive.
+export async function convertOfficeFileToPdf(fileId, mimeType) {
+  const drive = await getDriveClient()
+  const isPresentation = mimeType.includes('presentation') || mimeType === 'application/vnd.ms-powerpoint'
+  const targetMimeType = isPresentation
+    ? 'application/vnd.google-apps.presentation'
+    : 'application/vnd.google-apps.document'
+
+  const copied = await drive.files.copy({
+    fileId,
+    requestBody: { mimeType: targetMimeType },
+    supportsAllDrives: true,
+    fields: 'id',
+  })
+  const convertedId = copied.data.id
+
+  try {
+    const exportResponse = await drive.files.export(
+      { fileId: convertedId, mimeType: 'application/pdf' },
+      { responseType: 'arraybuffer' }
+    )
+    return Buffer.from(exportResponse.data)
+  } finally {
+    await drive.files.delete({ fileId: convertedId, supportsAllDrives: true }).catch((err) => {
+      console.error(`Failed to clean up temporary converted file ${convertedId}:`, err.message)
+    })
+  }
+}
