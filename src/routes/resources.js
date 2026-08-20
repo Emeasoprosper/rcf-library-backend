@@ -1,4 +1,5 @@
 import { Router } from 'express'
+import crypto from 'crypto'
 import { query } from '../db/pool.js'
 import { attachUser, requireAuth } from '../middleware/auth.js'
 import { downloadFromStorage, convertOfficeFileToPdf } from '../services/storage.js'
@@ -201,6 +202,61 @@ router.post('/meta/categories', attachUser, requireAuth, async (req, res) => {
 router.get('/meta/departments', async (req, res) => {
   const result = await query(`SELECT id, name FROM departments ORDER BY name ASC`)
   res.json({ items: result.rows })
+})
+
+// POST /:id/share — creates (or returns the existing) share link for a
+// resource. One canonical token per resource (UNIQUE constraint on
+// resource_id), so re-sharing the same file always produces the same
+// link instead of littering the table with duplicates. Requires auth —
+// only a signed-in user can mint a link, though anyone who receives it
+// still has to sign in themselves to actually open the preview (see
+// /share/:token/resolve below and shareLanding.js for the public
+// unfurl page crawlers read).
+router.post('/:id/share', attachUser, requireAuth, async (req, res) => {
+  const resourceCheck = await query(
+    `SELECT id FROM resources WHERE id = $1 AND status = 'approved'`,
+    [req.params.id]
+  )
+  if (resourceCheck.rows.length === 0) return res.status(404).json({ error: 'Resource not found' })
+
+  const existing = await query(`SELECT token FROM resource_shares WHERE resource_id = $1`, [req.params.id])
+  let token = existing.rows[0]?.token
+
+  if (!token) {
+    token = crypto.randomBytes(9).toString('base64url') // ~12 url-safe chars
+    await query(
+      `INSERT INTO resource_shares (resource_id, token, created_by)
+       VALUES ($1, $2, $3) ON CONFLICT (resource_id) DO NOTHING`,
+      [req.params.id, token, req.user.id]
+    )
+    // Re-read in case a concurrent request won the race and inserted first.
+    const confirmed = await query(`SELECT token FROM resource_shares WHERE resource_id = $1`, [req.params.id])
+    token = confirmed.rows[0].token
+  }
+
+  const shareBaseUrl = process.env.SHARE_BASE_URL || `${req.protocol}://${req.get('host')}`
+  res.json({ token, shareUrl: `${shareBaseUrl}/s/${token}` })
+})
+
+// GET /share/:token/resolve — the ONLY thing a share token can be
+// exchanged for is a resource id. Requires auth, same as every other
+// resource-scoped route — so opening a shared link with no account (or
+// an expired session) stops here and the frontend sends the visitor to
+// sign in first. There is deliberately no equivalent "resolve to a
+// download" route: getting the file still means going through the
+// normal /resources/:id page and its existing, unchanged download gate.
+router.get('/share/:token/resolve', attachUser, requireAuth, async (req, res) => {
+  const result = await query(
+    `SELECT rs.resource_id, r.status FROM resource_shares rs
+     JOIN resources r ON r.id = rs.resource_id
+     WHERE rs.token = $1`,
+    [req.params.token]
+  )
+  if (result.rows.length === 0 || result.rows[0].status !== 'approved') {
+    return res.status(404).json({ error: 'Share link not found or no longer available' })
+  }
+  await query(`UPDATE resource_shares SET click_count = click_count + 1 WHERE token = $1`, [req.params.token])
+  res.json({ resourceId: result.rows[0].resource_id })
 })
 
 router.get('/:id/thumbnail', async (req, res) => {

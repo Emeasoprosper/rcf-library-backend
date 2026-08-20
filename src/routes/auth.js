@@ -203,9 +203,21 @@ router.get('/google/callback', async (req, res) => {
 // cookies then 302-redirects the browser back to the frontend, already
 // signed in. Avoids the whole "Failed to open popup window" failure mode
 // entirely, since no popup is ever opened — the page just navigates.
+// Only ever a same-origin relative path (e.g. "/s/abc123"), never a full
+// URL — blocks a crafted returnTo like "https://evil.com" or
+// "//evil.com" (protocol-relative — still an external host to a
+// browser) from turning this into an open redirect that hands a fresh,
+// authenticated session off to an attacker-controlled origin.
+function sanitizeReturnTo(raw) {
+  if (typeof raw !== 'string') return null
+  if (!raw.startsWith('/') || raw.startsWith('//')) return null
+  return raw
+}
+
 router.post('/google/redirect-callback', async (req, res) => {
   const idToken = req.body?.credential
   const frontendUrl = (process.env.FRONTEND_URLS || '').split(',')[0]?.trim() || '/'
+  const returnTo = sanitizeReturnTo(req.query?.returnTo) || '/home'
 
   if (!idToken) return res.redirect(`${frontendUrl}/signin?error=missing_credential`)
 
@@ -236,7 +248,7 @@ router.post('/google/redirect-callback', async (req, res) => {
     }
 
     await issueSession(res, user, req)
-    res.redirect(`${frontendUrl}/home`)
+    res.redirect(`${frontendUrl}${returnTo}`)
   } catch (err) {
     console.error('Google redirect sign-in failed:', err.message)
     res.redirect(`${frontendUrl}/signin?error=signin_failed`)

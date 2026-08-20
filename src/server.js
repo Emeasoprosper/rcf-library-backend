@@ -24,6 +24,7 @@ import adminRoutes from './routes/admin.js'
 import communityRoutes from './routes/community.js'
 import analyticsRoutes from './routes/analytics.js'
 import newsRoutes from './routes/news.js'
+import shareLandingRoutes from './routes/shareLanding.js'
 import { startNewsRefreshLoop } from './services/newsService.js'
 
 // Safety net for anything that still somehow escapes express-async-errors
@@ -98,6 +99,10 @@ app.use((req, res, next) => {
   // error (since accounts.google.com is never in FRONTEND_URLS), which
   // our error handler turns into a 400 — exactly the bug this fixes.
   if (req.path === '/api/auth/google/redirect-callback') return next()
+  // Public share-unfurl pages (see shareLanding.js) — opened by link
+  // previews and normal top-level navigation, never a same-origin fetch,
+  // so there's no Origin header to check and nothing here needs cookies.
+  if (req.path.startsWith('/s/')) return next()
 
   cors({
     origin: (origin, callback) => {
@@ -124,7 +129,15 @@ app.use('/api/auth/login', strictLimiter)
 app.use('/api/auth/signup', strictLimiter)
 app.use('/api/uploads', strictLimiter)
 
+// Loose limiter on the public unfurl page — enough headroom for real
+// crawler/link traffic, but a ceiling against someone scripting token
+// guesses (tokens are 12 random url-safe chars, so guessing isn't
+// realistically feasible anyway — this is just a backstop).
+const shareLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 120 })
+app.use('/s/', shareLimiter)
+
 app.get('/health', (req, res) => res.json({ ok: true }))
+app.use('/s', shareLandingRoutes)
 
 app.use('/api/auth', authRoutes)
 app.use('/api/resources', resourcesRoutes)
