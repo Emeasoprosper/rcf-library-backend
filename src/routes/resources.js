@@ -1,10 +1,21 @@
 import { Router } from 'express'
 import { query } from '../db/pool.js'
 import { attachUser, requireAuth } from '../middleware/auth.js'
-import { downloadFromStorage } from '../services/storage.js'
+import { downloadFromStorage, convertOfficeFileToPdf } from '../services/storage.js'
 import { watermarkPdf } from '../services/watermark.js'
 
 const router = Router()
+
+// .docx is excluded on purpose — docx-preview already renders it
+// client-side from the raw bytes, so converting it here would just add
+// a slower Drive round-trip for no benefit. These three have no working
+// client-side renderer, so they're converted to a real PDF on every
+// stream/download request instead.
+const OFFICE_TO_PDF_MIME_TYPES = new Set([
+  'application/msword',
+  'application/vnd.ms-powerpoint',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+])
 
 function buildPrefixTsQuery(raw) {
   const tokens = raw
@@ -257,14 +268,21 @@ router.get('/:id/stream', attachUser, requireAuth, async (req, res) => {
   if (resourceResult.rows.length === 0) return res.status(404).json({ error: 'Resource not found' })
 
   const { file_id, file_name, file_type } = resourceResult.rows[0]
+  const needsPdfConversion = OFFICE_TO_PDF_MIME_TYPES.has(file_type)
 
   try {
-    const buffer = await downloadFromStorage(file_id)
+    const buffer = needsPdfConversion
+      ? await convertOfficeFileToPdf(file_id, file_type)
+      : await downloadFromStorage(file_id)
     const totalSize = buffer.length
+    const outputMimeType = needsPdfConversion ? 'application/pdf' : file_type
+    const outputFileName = needsPdfConversion
+      ? file_name.replace(/\.[^./\\]+$/, '') + '.pdf'
+      : file_name
 
-    res.setHeader('Content-Type', file_type)
+    res.setHeader('Content-Type', outputMimeType)
     res.setHeader('Accept-Ranges', 'bytes')
-    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(file_name)}"`)
+    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(outputFileName)}"`)
 
     const rangeHeader = req.headers.range
 
@@ -322,16 +340,23 @@ router.get('/:id/download-file', attachUser, requireAuth, async (req, res) => {
   if (result.rows.length === 0) return res.status(404).json({ error: 'Resource not found' })
 
   const { file_id, file_name, file_type } = result.rows[0]
+  const needsPdfConversion = OFFICE_TO_PDF_MIME_TYPES.has(file_type)
 
   try {
-    let buffer = await downloadFromStorage(file_id)
+    let buffer = needsPdfConversion
+      ? await convertOfficeFileToPdf(file_id, file_type)
+      : await downloadFromStorage(file_id)
+    const outputMimeType = needsPdfConversion ? 'application/pdf' : file_type
+    const outputFileName = needsPdfConversion
+      ? file_name.replace(/\.[^./\\]+$/, '') + '.pdf'
+      : file_name
 
-    if (file_type === 'application/pdf') {
+    if (outputMimeType === 'application/pdf') {
       buffer = await watermarkPdf(buffer)
     }
 
-    res.setHeader('Content-Type', file_type)
-    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(file_name)}"`)
+    res.setHeader('Content-Type', outputMimeType)
+    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(outputFileName)}"`)
     res.send(buffer)
   } catch (err) {
     console.error(`Failed to prepare download for resource ${req.params.id}:`, err.message)
