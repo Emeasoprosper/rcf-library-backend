@@ -55,14 +55,14 @@ function buildThumbnailUrl(resourceId) {
   return `${base}/api/resources/${resourceId}/thumbnail`
 }
 
-export function queuePreviewGeneration(resourceId, storedFile, mimeType, fileBuffer) {
-  generatePreview(resourceId, storedFile, mimeType, fileBuffer).catch((err) => {
+export function queuePreviewGeneration(resourceId, storedFile, mimeType, fileBuffer, clientThumbnail = null) {
+  generatePreview(resourceId, storedFile, mimeType, fileBuffer, clientThumbnail).catch((err) => {
     console.error(`Preview generation failed entirely for resource ${resourceId}:`, err)
     query(`UPDATE resources SET thumbnail_status = 'unavailable' WHERE id = $1`, [resourceId]).catch(() => {})
   })
 }
 
-async function generatePreview(resourceId, storedFile, mimeType, fileBuffer) {
+async function generatePreview(resourceId, storedFile, mimeType, fileBuffer, clientThumbnail) {
   await query(`UPDATE resources SET thumbnail_status = 'processing' WHERE id = $1`, [resourceId])
 
   const metaResult = await query(
@@ -75,23 +75,32 @@ async function generatePreview(resourceId, storedFile, mimeType, fileBuffer) {
 
   let result = null
 
-  try {
-    if (mimeType === 'application/pdf') {
-      result = await previewFromPdf(fileBuffer)
-    } else if (mimeType.startsWith('image/')) {
-      // The uploaded image IS the thumbnail — no separate generation
-      // needed, just point the proxy route at the original file.
-      result = { thumbnailFileId: storedFile.fileId }
-    } else if (mimeType.startsWith('video/')) {
-      result = await previewFromVideo(fileBuffer)
-    } else if (mimeType.startsWith('audio/')) {
-      result = await previewFromAudio(fileBuffer)
-    } else if (isWordOrPowerpoint(mimeType)) {
-      result = await previewFromOffice(storedFile, mimeType)
+  if (clientThumbnail?.fileId) {
+    // A real thumbnail was already rendered client-side and uploaded
+    // (currently: DOCX, via docxThumbnail.js). Use it directly instead
+    // of attempting server-side generation, which is known to fail for
+    // office formats (see previewFromOffice stub below) and would just
+    // waste time before falling back anyway.
+    result = { thumbnailFileId: clientThumbnail.fileId }
+  } else {
+    try {
+      if (mimeType === 'application/pdf') {
+        result = await previewFromPdf(fileBuffer)
+      } else if (mimeType.startsWith('image/')) {
+        // The uploaded image IS the thumbnail — no separate generation
+        // needed, just point the proxy route at the original file.
+        result = { thumbnailFileId: storedFile.fileId }
+      } else if (mimeType.startsWith('video/')) {
+        result = await previewFromVideo(fileBuffer)
+      } else if (mimeType.startsWith('audio/')) {
+        result = await previewFromAudio(fileBuffer)
+      } else if (isWordOrPowerpoint(mimeType)) {
+        result = await previewFromOffice(storedFile, mimeType)
+      }
+    } catch (err) {
+      console.warn(`Real preview unavailable for resource ${resourceId} (${mimeType}): ${err.message} — using generated cover instead.`)
+      result = null
     }
-  } catch (err) {
-    console.warn(`Real preview unavailable for resource ${resourceId} (${mimeType}): ${err.message} — using generated cover instead.`)
-    result = null
   }
 
   // PDF, video, and audio-with-artwork paths return a pngBuffer that
