@@ -301,12 +301,24 @@ function sniffImageContentType(buffer) {
 const THUMBNAIL_CACHE_MAX_ENTRIES = 500
 const thumbnailCache = new Map() // fileId -> { buffer, contentType }
 
-function cacheThumbnail(fileId, buffer, contentType) {
+function cacheThumbnail(fileId, buffer, contentType, width, height) {
   if (thumbnailCache.size >= THUMBNAIL_CACHE_MAX_ENTRIES) {
     const oldestKey = thumbnailCache.keys().next().value
     thumbnailCache.delete(oldestKey)
   }
-  thumbnailCache.set(fileId, { buffer, contentType })
+  thumbnailCache.set(fileId, { buffer, contentType, width, height })
+}
+
+// Used by shareLanding.js to declare real og:image:width/height on the
+// unfurl page. Confirmed via live WhatsApp testing: without these tags,
+// WhatsApp can't confirm the image meets its large-card size threshold
+// up front and silently falls back to the small compact card — even
+// though the image itself loads fine. Reuses the same cache/compression
+// path as the thumbnail route itself, so the numbers always match what
+// actually gets served.
+export async function getThumbnailMeta(fileId) {
+  const cached = thumbnailCache.get(fileId) || (await loadAndCacheThumbnail(fileId))
+  return { width: cached.width, height: cached.height }
 }
 
 // Re-encodes the raw thumbnail down to a capped width + compressed JPEG
@@ -322,21 +334,28 @@ async function loadAndCacheThumbnail(fileId) {
   const rawBuffer = await downloadFromStorage(fileId)
   let buffer
   let contentType
+  let width = null
+  let height = null
   try {
     buffer = await sharp(rawBuffer)
       .resize({ width: 600, withoutEnlargement: true })
       .jpeg({ quality: 78 })
       .toBuffer()
     contentType = 'image/jpeg'
+    const dims = await sharp(buffer).metadata()
+    width = dims.width
+    height = dims.height
   } catch (err) {
     // If the source isn't something sharp can decode, fall back to
     // serving the original untouched rather than failing the request.
+    // width/height stay null — shareLanding.js just omits those tags
+    // in that case, same as before this change.
     console.error(`Thumbnail compression failed for ${fileId}, serving original:`, err.message)
     buffer = rawBuffer
     contentType = sniffImageContentType(rawBuffer)
   }
-  cacheThumbnail(fileId, buffer, contentType)
-  return { buffer, contentType }
+  cacheThumbnail(fileId, buffer, contentType, width, height)
+  return { buffer, contentType, width, height }
 }
 
 router.get('/:id/thumbnail', async (req, res) => {

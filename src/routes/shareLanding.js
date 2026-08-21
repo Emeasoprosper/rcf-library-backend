@@ -1,6 +1,7 @@
 // RCFMOUAULIBRARYreact/rcf-library-backend/src/routes/shareLanding.js
 import { Router } from 'express'
 import { query } from '../db/pool.js'
+import { getThumbnailMeta } from './resources.js'
 
 const router = Router()
 const SITE_NAME = 'RCFMOUAU Library'
@@ -24,7 +25,7 @@ function escapeHtml(str = '') {
 // frontend's authenticated /resources/:id flow.
 router.get('/:token', async (req, res) => {
   const result = await query(
-    `SELECT rs.resource_id, r.title, r.author, r.description, r.status
+    `SELECT rs.resource_id, r.title, r.author, r.description, r.status, r.thumbnail_file_id
      FROM resource_shares rs
      JOIN resources r ON r.id = rs.resource_id
      WHERE rs.token = $1`,
@@ -36,13 +37,30 @@ router.get('/:token', async (req, res) => {
     return
   }
 
-  const { resource_id, title, author, description } = result.rows[0]
+  const { resource_id, title, author, description, thumbnail_file_id } = result.rows[0]
   const backendOrigin = `${req.protocol}://${req.get('host')}`
   const thumbnailUrl = `${backendOrigin}/api/resources/${resource_id}/thumbnail`
   const redirectUrl = `${APP_URL}/s/${req.params.token}`
 
   const safeTitle = escapeHtml(title)
   const safeDesc = escapeHtml(author ? `By ${author}` : (description || `Shared from ${SITE_NAME}`))
+
+  // Best-effort — if this fails or there's no thumbnail, the tags below
+  // are just omitted (same behavior as before this change).
+  let imageWidth = null
+  let imageHeight = null
+  if (thumbnail_file_id) {
+    try {
+      const meta = await getThumbnailMeta(thumbnail_file_id)
+      imageWidth = meta.width
+      imageHeight = meta.height
+    } catch (err) {
+      console.error(`Failed to get thumbnail dimensions for share page:`, err.message)
+    }
+  }
+  const dimensionTags = imageWidth && imageHeight
+    ? `\n  <meta property="og:image:width" content="${imageWidth}">\n  <meta property="og:image:height" content="${imageHeight}">`
+    : ''
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8')
   res.send(`<!DOCTYPE html>
@@ -54,7 +72,7 @@ router.get('/:token', async (req, res) => {
   <meta property="og:site_name" content="${SITE_NAME}">
   <meta property="og:title" content="${safeTitle}">
   <meta property="og:description" content="${safeDesc}">
-  <meta property="og:image" content="${thumbnailUrl}">
+  <meta property="og:image" content="${thumbnailUrl}">${dimensionTags}
   <meta property="og:url" content="${backendOrigin}/s/${req.params.token}">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="${safeTitle}">
