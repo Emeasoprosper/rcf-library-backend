@@ -25,6 +25,8 @@ import communityRoutes from './routes/community.js'
 import analyticsRoutes from './routes/analytics.js'
 import newsRoutes from './routes/news.js'
 import shareLandingRoutes from './routes/shareLanding.js'
+import shareTokenRoutes from './routes/shareToken.js'
+import sitemapRoutes from './routes/sitemap.js'
 import { startNewsRefreshLoop } from './services/newsService.js'
 
 // Safety net for anything that still somehow escapes express-async-errors
@@ -99,10 +101,11 @@ app.use((req, res, next) => {
   // error (since accounts.google.com is never in FRONTEND_URLS), which
   // our error handler turns into a 400 — exactly the bug this fixes.
   if (req.path === '/api/auth/google/redirect-callback') return next()
-  // Public share-unfurl pages (see shareLanding.js) — opened by link
-  // previews and normal top-level navigation, never a same-origin fetch,
-  // so there's no Origin header to check and nothing here needs cookies.
-  if (req.path.startsWith('/s/')) return next()
+  // Public SEO/share-unfurl pages — opened by link previews, search
+  // engine crawlers, and normal top-level navigation, never a
+  // same-origin fetch, so there's no Origin header to check and nothing
+  // here needs cookies.
+  if (req.path.startsWith('/s/') || req.path.startsWith('/library/') || req.path === '/sitemap.xml' || req.path === '/robots.txt') return next()
 
   cors({
     origin: (origin, callback) => {
@@ -137,7 +140,9 @@ const shareLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 120 })
 app.use('/s/', shareLimiter)
 
 app.get('/health', (req, res) => res.json({ ok: true }))
-app.use('/s', shareLandingRoutes)
+app.use('/', sitemapRoutes)
+app.use('/s', shareTokenRoutes)
+app.use('/library', shareLandingRoutes)
 
 app.use('/api/auth', authRoutes)
 app.use('/api/resources', resourcesRoutes)
