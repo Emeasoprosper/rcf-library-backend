@@ -45,17 +45,28 @@ router.get('/:token', async (req, res) => {
   const safeTitle = escapeHtml(title)
   const safeDesc = escapeHtml(author ? `By ${author}` : (description || `Shared from ${SITE_NAME}`))
 
-  // Best-effort — if this fails or there's no thumbnail, the tags below
-  // are just omitted (same behavior as before this change).
+  // Best-effort, TIME-BOXED. This page's own load must stay fast
+  // regardless of thumbnail state — confirmed via live testing that
+  // letting this block on an uncached thumbnail (full Drive fetch +
+  // sharp resize) slowed the page response enough to break WhatsApp's
+  // preview entirely, worse than omitting these tags. If the thumbnail
+  // is already cached this resolves near-instantly; if not, it's
+  // skipped this time and will simply be present on the NEXT request
+  // once the normal /thumbnail route (hit separately by the crawler)
+  // has warmed the cache.
   let imageWidth = null
   let imageHeight = null
   if (thumbnail_file_id) {
     try {
-      const meta = await getThumbnailMeta(thumbnail_file_id)
+      const meta = await Promise.race([
+        getThumbnailMeta(thumbnail_file_id),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 800)),
+      ])
       imageWidth = meta.width
       imageHeight = meta.height
     } catch (err) {
-      console.error(`Failed to get thumbnail dimensions for share page:`, err.message)
+      // Timed out or failed — not an error worth logging noisily, this
+      // is an expected/acceptable skip path, not a bug.
     }
   }
   const dimensionTags = imageWidth && imageHeight
