@@ -259,6 +259,28 @@ router.get('/share/:token/resolve', attachUser, requireAuth, async (req, res) =>
   res.json({ resourceId: result.rows[0].resource_id })
 })
 
+// Sniffs the real image format from the file's magic bytes instead of
+// assuming PNG. Serving the wrong Content-Type here (e.g. labeling a
+// real JPEG as image/png) is a common reason Meta's link-preview
+// crawler — which WhatsApp, Facebook, and Instagram all share —
+// silently rejects the image and falls back to the small text-only
+// link card instead of the big Spotify-style preview.
+function sniffImageContentType(buffer) {
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return 'image/jpeg'
+  }
+  if (
+    buffer.length >= 8 &&
+    buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47
+  ) {
+    return 'image/png'
+  }
+  if (buffer.length >= 4 && buffer.toString('ascii', 0, 4) === 'RIFF') {
+    return 'image/webp'
+  }
+  return 'image/jpeg' // safest fallback — matches most cover-generation output
+}
+
 router.get('/:id/thumbnail', async (req, res) => {
   const result = await query(
     `SELECT thumbnail_file_id FROM resources WHERE id = $1`,
@@ -269,7 +291,7 @@ router.get('/:id/thumbnail', async (req, res) => {
 
   try {
     const buffer = await downloadFromStorage(fileId)
-    res.setHeader('Content-Type', 'image/png')
+    res.setHeader('Content-Type', sniffImageContentType(buffer))
     res.setHeader('Cache-Control', 'public, max-age=86400')
     res.send(buffer)
   } catch (err) {
