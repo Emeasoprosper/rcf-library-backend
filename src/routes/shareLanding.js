@@ -54,22 +54,8 @@ router.get('/:token', async (req, res) => {
   <meta property="og:site_name" content="${SITE_NAME}">
   <meta property="og:title" content="${safeTitle}">
   <meta property="og:description" content="${safeDesc}">
-          resourceData = {
-            id,
-            title: offlineMeta?.title || 'Downloaded Resource',
-            author: offlineMeta?.author || '',
-            category: offlineMeta?.category || '',
-            department: offlineMeta?.department || '',
-            level: offlineMeta?.level || '',
-            file_type: offlineMeta?.fileType,
-            // FIX: offlineMeta.thumbnail is already a local data: URL
-            // (embedded at download time by offlineStorage.js's
-            // resolveThumbnailToDataUrl) — safe to use with zero network.
-            // This was hardcoded null, which is why the audio cover art
-            // and video poster went blank offline even when a thumbnail
-            // had been successfully downloaded.
-            thumbnail_url: offlineMeta?.thumbnail || null,
-          }
+  <meta property="og:image" content="${thumbnailUrl}">
+  <meta property="og:url" content="${backendOrigin}/s/${req.params.token}">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="${safeTitle}">
   <meta name="twitter:description" content="${safeDesc}">
