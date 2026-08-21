@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import crypto from 'crypto'
+import sharp from 'sharp'
 import { query } from '../db/pool.js'
 import { attachUser, requireAuth } from '../middleware/auth.js'
 import { downloadFromStorage, convertOfficeFileToPdf } from '../services/storage.js'
@@ -308,6 +309,36 @@ function cacheThumbnail(fileId, buffer, contentType) {
   thumbnailCache.set(fileId, { buffer, contentType })
 }
 
+// Re-encodes the raw thumbnail down to a capped width + compressed JPEG
+// before caching. Confirmed via Meta's Sharing Debugger + direct WhatsApp
+// tests: the original files here run ~850 kB, and even with the
+// in-memory cache eliminating the slow Drive round-trip, WhatsApp's
+// crawler STILL silently failed to render the image — its own fetch
+// timeout is apparently tighter than what a file this size needs, even
+// served instantly from RAM. 600px wide / quality 78 routinely lands
+// under 100 kB with no visible quality loss at the size a link-preview
+// card actually renders images.
+async function loadAndCacheThumbnail(fileId) {
+  const rawBuffer = await downloadFromStorage(fileId)
+  let buffer
+  let contentType
+  try {
+    buffer = await sharp(rawBuffer)
+      .resize({ width: 600, withoutEnlargement: true })
+      .jpeg({ quality: 78 })
+      .toBuffer()
+    contentType = 'image/jpeg'
+  } catch (err) {
+    // If the source isn't something sharp can decode, fall back to
+    // serving the original untouched rather than failing the request.
+    console.error(`Thumbnail compression failed for ${fileId}, serving original:`, err.message)
+    buffer = rawBuffer
+    contentType = sniffImageContentType(rawBuffer)
+  }
+  cacheThumbnail(fileId, buffer, contentType)
+  return { buffer, contentType }
+}
+
 router.get('/:id/thumbnail', async (req, res) => {
   const result = await query(
     `SELECT thumbnail_file_id FROM resources WHERE id = $1`,
@@ -317,13 +348,7 @@ router.get('/:id/thumbnail', async (req, res) => {
   if (!fileId) return res.status(404).json({ error: 'No thumbnail available' })
 
   try {
-    let cached = thumbnailCache.get(fileId)
-    if (!cached) {
-      const buffer = await downloadFromStorage(fileId)
-      const contentType = sniffImageContentType(buffer)
-      cacheThumbnail(fileId, buffer, contentType)
-      cached = { buffer, contentType }
-    }
+    const cached = thumbnailCache.get(fileId) || (await loadAndCacheThumbnail(fileId))
     res.setHeader('Content-Type', cached.contentType)
     res.setHeader('Cache-Control', 'public, max-age=86400')
     res.send(cached.buffer)
