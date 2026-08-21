@@ -60,7 +60,13 @@ router.get('/:token', async (req, res) => {
   <meta name="twitter:title" content="${safeTitle}">
   <meta name="twitter:description" content="${safeDesc}">
   <meta name="twitter:image" content="${thumbnailUrl}">
-  <meta http-equiv="refresh" content="0; url=${redirectUrl}">
+  <!-- No meta http-equiv="refresh" here on purpose. Facebook/WhatsApp's
+       crawler (unlike a real browser) doesn't execute JS but DOES follow
+       a meta-refresh — so it was following this straight to the frontend
+       route below and hitting a 404 there, wiping out every og: tag on
+       this page before Facebook ever saw them. Real visitors still get
+       redirected instantly via the script below; a meta-refresh fallback
+       just isn't worth breaking link previews for. -->
   <script>window.location.replace(${JSON.stringify(redirectUrl)});</script>
 </head>
 <body>
