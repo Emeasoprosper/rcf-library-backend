@@ -281,6 +281,33 @@ function sniffImageContentType(buffer) {
   return 'image/jpeg' // safest fallback — matches most cover-generation output
 }
 
+// In-process thumbnail cache. This is what actually fixes the WhatsApp/
+// crawler preview: without it, EVERY request for a thumbnail — including
+// WhatsApp's own crawler fetching og:image — pays a full live Google
+// Drive round-trip (~1.7–3.4s measured, sometimes more), which exceeds
+// most link-preview crawlers' fetch timeout and is why the image never
+// showed even after the OG tags themselves were fixed. Deliberately
+// scoped to ONLY this route (not inside downloadFromStorage itself,
+// which is shared with /stream and /download-file for full resource
+// files) — thumbnails are small (under ~1MB each), full PDFs/videos are
+// not, and caching those in RAM too could exhaust memory on a small
+// Render instance.
+//
+// Simple Map, no TTL — thumbnails effectively never change once
+// generated (see previewQueue.js), and a fixed entry cap keeps memory
+// bounded on a small instance by evicting the oldest entry once full,
+// rather than growing without limit as more resources get thumbnails.
+const THUMBNAIL_CACHE_MAX_ENTRIES = 500
+const thumbnailCache = new Map() // fileId -> { buffer, contentType }
+
+function cacheThumbnail(fileId, buffer, contentType) {
+  if (thumbnailCache.size >= THUMBNAIL_CACHE_MAX_ENTRIES) {
+    const oldestKey = thumbnailCache.keys().next().value
+    thumbnailCache.delete(oldestKey)
+  }
+  thumbnailCache.set(fileId, { buffer, contentType })
+}
+
 router.get('/:id/thumbnail', async (req, res) => {
   const result = await query(
     `SELECT thumbnail_file_id FROM resources WHERE id = $1`,
@@ -290,10 +317,16 @@ router.get('/:id/thumbnail', async (req, res) => {
   if (!fileId) return res.status(404).json({ error: 'No thumbnail available' })
 
   try {
-    const buffer = await downloadFromStorage(fileId)
-    res.setHeader('Content-Type', sniffImageContentType(buffer))
+    let cached = thumbnailCache.get(fileId)
+    if (!cached) {
+      const buffer = await downloadFromStorage(fileId)
+      const contentType = sniffImageContentType(buffer)
+      cacheThumbnail(fileId, buffer, contentType)
+      cached = { buffer, contentType }
+    }
+    res.setHeader('Content-Type', cached.contentType)
     res.setHeader('Cache-Control', 'public, max-age=86400')
-    res.send(buffer)
+    res.send(cached.buffer)
   } catch (err) {
     console.error(`Failed to load thumbnail for resource ${req.params.id}:`, err.message)
     res.status(502).json({ error: 'Failed to load thumbnail' })
