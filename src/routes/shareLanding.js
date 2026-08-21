@@ -1,7 +1,7 @@
 // RCFMOUAULIBRARYreact/rcf-library-backend/src/routes/shareLanding.js
 import { Router } from 'express'
 import { query } from '../db/pool.js'
-import { getThumbnailMeta, getShareImage } from './resources.js'
+import { getThumbnailMeta } from './resources.js'
 
 const router = Router()
 const SITE_NAME = 'RCFMOUAU Library'
@@ -26,7 +26,7 @@ function escapeHtml(str = '') {
 async function renderSeoPage(req, res, { resourceRow, canonicalUrl, ctaUrl }) {
   const { id, title, author, description, thumbnail_file_id, category, department, level } = resourceRow
   const backendOrigin = `${req.protocol}://${req.get('host')}`
-  const shareImageUrl = `${backendOrigin}/api/resources/${id}/share-image`
+  const shareImageUrl = `${backendOrigin}/api/resources/${id}/thumbnail`
 
   const safeTitle = escapeHtml(title)
   const safeDesc = escapeHtml(author ? `By ${author}` : (description || `Shared from ${SITE_NAME}`))
@@ -35,11 +35,13 @@ async function renderSeoPage(req, res, { resourceRow, canonicalUrl, ctaUrl }) {
   let dimensionTags = ''
   if (thumbnail_file_id) {
     try {
-      await Promise.race([
-        getShareImage(thumbnail_file_id),
+      const meta = await Promise.race([
+        getThumbnailMeta(thumbnail_file_id),
         new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 800)),
       ])
-      dimensionTags = `\n  <meta property="og:image:width" content="1200">\n  <meta property="og:image:height" content="630">`
+      if (meta.width && meta.height) {
+        dimensionTags = `\n  <meta property="og:image:width" content="${meta.width}">\n  <meta property="og:image:height" content="${meta.height}">`
+      }
     } catch {
       // Best-effort — omitted if not ready in time, same as before.
     }
