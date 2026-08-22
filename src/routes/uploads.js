@@ -90,9 +90,13 @@ router.post(
   '/analyze',
   attachUser,
   requireAuth,
-  upload.single('file'),
+  upload.fields([
+    { name: 'file', maxCount: 1 },
+    { name: 'thumbnail', maxCount: 1 }, // optional — client-rendered page-1 preview, used as a fallback when the file has no extractable text
+  ]),
   async (req, res) => {
-    const uploadedFile = req.file
+    const uploadedFile = req.files?.file?.[0]
+    const uploadedThumbnail = req.files?.thumbnail?.[0]
     if (!uploadedFile) return res.status(400).json({ error: 'No file provided' })
 
     const { resourceTypeSlug } = req.body
@@ -117,6 +121,7 @@ router.post(
       resourceTypeSlug,
       existingCategories,
       filenameTitle,
+      thumbnailBuffer: uploadedThumbnail?.buffer || null,
     })
 
     // suggestion is null whenever there's nothing useful to offer (AI

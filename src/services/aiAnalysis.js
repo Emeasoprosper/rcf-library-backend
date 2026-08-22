@@ -128,7 +128,7 @@ async function matchCategory(suggestionName) {
 // Returns null when there's nothing useful to suggest (AI unavailable,
 // unsupported file type, or the model call itself failed) — callers treat
 // null as "fall back to manual entry," never as an error condition.
-export async function analyzeResourceFile({ buffer, mimetype, extractedText, resourceTypeSlug, existingCategories = [], filenameTitle = null }) {
+export async function analyzeResourceFile({ buffer, mimetype, extractedText, resourceTypeSlug, existingCategories = [], filenameTitle = null, thumbnailBuffer = null }) {
   if (!GEMINI_API_KEY) {
     console.warn('GEMINI_API_KEY not set — skipping AI analysis, manual entry only.')
     return filenameTitle ? { title: filenameTitle, author: null, description: null, tags: [], chapterOrPart: null, course: await lookupCourse(null), category: { categoryId: null, categoryName: null, isNew: false } } : null
@@ -144,13 +144,17 @@ export async function analyzeResourceFile({ buffer, mimetype, extractedText, res
     parts.push({ inlineData: { mimeType: mimetype, data: buffer.toString('base64') } })
   } else if (extractedText) {
     parts.push({ text: extractedText.slice(0, MAX_EXTRACTED_TEXT_CHARS) })
+  } else if (thumbnailBuffer) {
+    // No text layer at all — almost always a scanned/image-only PDF.
+    // Falls back to Gemini's vision capability on the already-rendered
+    // page-1 thumbnail instead of giving up, same as a human would read
+    // the cover page to identify a scanned book.
+    parts.push({ inlineData: { mimeType: 'image/jpeg', data: thumbnailBuffer.toString('base64') } })
   } else {
-    // Non-image, no extractable text (e.g. a scanned/image-only PDF, or
-    // a .doc/.ppt we don't parse client-side) — nothing for Gemini to
-    // read, but the filename is still a real signal worth using rather
-    // than leaving the title blank.
+    // Truly nothing to work with — no text, no image fallback available
+    // either (e.g. a .doc/.ppt we don't parse). Filename is the last resort.
     return filenameTitle
-      ? { title: filenameTitle, author: null, description: null, tags: [], chapterOrPart: null, course: await lookupCourse(null), category: { categoryId: null, categoryName: null, isNew: false }, _debugError: 'no_extractable_text' }
+      ? { title: filenameTitle, author: null, description: null, tags: [], chapterOrPart: null, course: await lookupCourse(null), category: { categoryId: null, categoryName: null, isNew: false }, _debugError: 'no_extractable_text_or_thumbnail' }
       : null
   }
 
