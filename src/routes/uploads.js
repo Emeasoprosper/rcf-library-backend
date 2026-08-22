@@ -5,7 +5,8 @@ import { attachUser, requireAuth } from '../middleware/auth.js'
 import { uploadToStorage } from '../services/storage.js'
 import { resolveUploadCategory } from '../config/driveFolders.js'
 import { queuePreviewGeneration } from '../services/previewQueue.js'
-import { extractBasicMetadata } from '../utils/metadata.js'
+import { extractBasicMetadata, extractTextContent } from '../utils/metadata.js'
+import { analyzeResourceFile, lookupCourse } from '../services/aiAnalysis.js'
 
 const router = Router()
 
@@ -81,6 +82,42 @@ function resolveMediaSubtype(mimetype, rawValue) {
   return null
 }
 
+// POST /analyze — takes one file, returns AI-suggested metadata. Writes
+// NOTHING to the database: this only ever backs the "AI analyzes → form
+// auto-fills → user edits → user submits" preview step. The real create
+// still only happens through POST / below, unchanged.
+router.post(
+  '/analyze',
+  attachUser,
+  requireAuth,
+  upload.single('file'),
+  async (req, res) => {
+    const uploadedFile = req.file
+    if (!uploadedFile) return res.status(400).json({ error: 'No file provided' })
+
+    const { resourceTypeSlug } = req.body
+
+    const categoriesResult = await query('SELECT name FROM categories ORDER BY name ASC')
+    const existingCategories = categoriesResult.rows.map((r) => r.name)
+
+    const extractedText = await extractTextContent(uploadedFile)
+
+    const suggestion = await analyzeResourceFile({
+      buffer: uploadedFile.buffer,
+      mimetype: uploadedFile.mimetype,
+      extractedText,
+      resourceTypeSlug,
+      existingCategories,
+    })
+
+    // suggestion is null whenever there's nothing useful to offer (AI
+    // unavailable, unsupported file type, or the call itself failed) —
+    // the frontend treats that identically to "user hasn't touched AI
+    // suggestions yet," never as an error state.
+    res.json({ suggestion })
+  }
+)
+
 router.post(
   '/',
   attachUser,
@@ -97,13 +134,21 @@ router.post(
 
     const {
       title, author, courseCode, description, resourceTypeSlug,
-      categoryId, departmentId, level, semester, isAnonymous, mediaSubtype,
+      categoryId, departmentId, level, semester, isAnonymous, mediaSubtype, tags,
     } = req.body
 
     const typeResult = await query('SELECT id FROM resource_types WHERE slug = $1', [resourceTypeSlug])
     if (typeResult.rows.length === 0) return res.status(400).json({ error: 'Invalid resource type' })
 
     const basicMetadata = await extractBasicMetadata(uploadedFile)
+
+    // Ground truth wins regardless of what the AI suggested earlier or
+    // what the client sent — if the course code matches a known MOUAU
+    // course, department/level come from that row, never from the form.
+    const courseInfo = await lookupCourse(courseCode)
+    const finalCourseCode = courseInfo.code || courseCode || null
+    const finalDepartmentId = courseInfo.found ? courseInfo.departmentId : (departmentId || null)
+    const finalLevel = courseInfo.found ? courseInfo.level : (level || null)
 
     // Uploader-provided values always win — but only if they don't look like
     // machine-generated junk. A hash/UUID/camera-default filename is never
@@ -148,8 +193,8 @@ router.post(
        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,'pending',$21)
        RETURNING id`,
       [
-        finalTitle, finalAuthor, description || null, courseCode || null,
-        departmentId || null, categoryId || null, typeResult.rows[0].id, level || null, semester || null,
+        finalTitle, finalAuthor, description || null, finalCourseCode,
+        finalDepartmentId, categoryId || null, typeResult.rows[0].id, finalLevel, semester || null,
         stored.provider, stored.fileId, stored.fileUrl, uploadedFile.originalname, uploadedFile.mimetype, uploadedFile.size,
         basicMetadata.widthPx, basicMetadata.heightPx, basicMetadata.aspectRatio,
         req.user.id, anonymous, finalMediaSubtype,
@@ -157,6 +202,34 @@ router.post(
     )
 
     const resourceId = inserted.rows[0].id
+
+    // Tags: accepts either a JSON array string (what the frontend will
+    // send) or a plain comma-separated string, for direct-API-call
+    // resilience same as the rest of this route. Same case-insensitive
+    // find-or-create pattern as POST /meta/categories above, so "Theology"
+    // and "theology" typed by different uploaders always land on one tag.
+    if (tags) {
+      let tagNames
+      try {
+        tagNames = JSON.parse(tags)
+      } catch {
+        tagNames = String(tags).split(',')
+      }
+      tagNames = (Array.isArray(tagNames) ? tagNames : [])
+        .map((t) => String(t).trim())
+        .filter(Boolean)
+        .slice(0, 10)
+
+      for (const tagName of tagNames) {
+        const existingTag = await query('SELECT id FROM tags WHERE name ILIKE $1', [tagName])
+        const tagId = existingTag.rows[0]?.id
+          || (await query('INSERT INTO tags (name) VALUES ($1) RETURNING id', [tagName])).rows[0].id
+        await query(
+          'INSERT INTO resource_tags (resource_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+          [resourceId, tagId]
+        )
+      }
+    }
 
     // Passing uploadedFile.buffer directly means PDF page-1 rendering doesn't
     // need to re-download the file from Drive — it renders straight from

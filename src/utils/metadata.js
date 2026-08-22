@@ -95,3 +95,23 @@ function simplifyRatio(w, h) {
   const divisor = gcd(w, h)
   return `${w / divisor}:${h / divisor}`
 }
+
+// Raw text for the AI analysis pipeline (services/aiAnalysis.js) — kept
+// separate from extractBasicMetadata's Info-dict parsing above since this
+// needs actual page content, not just PDF metadata fields. Capped to the
+// first 8 pages: plenty for identifying title/author/course/topic without
+// spending time parsing a 300-page book in full on every upload.
+export async function extractTextContent(file) {
+  if (file.mimetype === 'application/pdf') {
+    try {
+      const parsed = await pdfParse(file.buffer, { max: 8 })
+      return parsed.text || null
+    } catch {
+      return null
+    }
+  }
+  // .doc/.docx/.ppt/.pptx aren't parsed for text server-side today —
+  // images are handled separately (sent directly to the model), and
+  // audio/video aren't analyzed at all yet (see aiAnalysis.js).
+  return null
+}
