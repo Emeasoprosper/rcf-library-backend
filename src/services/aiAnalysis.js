@@ -150,7 +150,7 @@ export async function analyzeResourceFile({ buffer, mimetype, extractedText, res
     // read, but the filename is still a real signal worth using rather
     // than leaving the title blank.
     return filenameTitle
-      ? { title: filenameTitle, author: null, description: null, tags: [], chapterOrPart: null, course: await lookupCourse(null), category: { categoryId: null, categoryName: null, isNew: false } }
+      ? { title: filenameTitle, author: null, description: null, tags: [], chapterOrPart: null, course: await lookupCourse(null), category: { categoryId: null, categoryName: null, isNew: false }, _debugError: 'no_extractable_text' }
       : null
   }
 
@@ -161,9 +161,13 @@ export async function analyzeResourceFile({ buffer, mimetype, extractedText, res
     aiResult = await callGemini(parts, prompt)
   } catch (err) {
     console.error('AI analysis failed, falling back to manual entry:', err.message)
+    // TEMPORARY DEBUG — surfaces the real Gemini error straight into the
+    // network response so it's visible without digging through Render
+    // logs. Remove _debugError once the root cause is found; never ship
+    // raw error text to end users long-term.
     return filenameTitle
-      ? { title: filenameTitle, author: null, description: null, tags: [], chapterOrPart: null, course: await lookupCourse(null), category: { categoryId: null, categoryName: null, isNew: false } }
-      : null
+      ? { title: filenameTitle, author: null, description: null, tags: [], chapterOrPart: null, course: await lookupCourse(null), category: { categoryId: null, categoryName: null, isNew: false }, _debugError: err.message }
+      : { _debugError: err.message }
   }
 
   const [course, category] = await Promise.all([
