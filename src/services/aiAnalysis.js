@@ -128,13 +128,13 @@ async function matchCategory(suggestionName) {
 // Returns null when there's nothing useful to suggest (AI unavailable,
 // unsupported file type, or the model call itself failed) — callers treat
 // null as "fall back to manual entry," never as an error condition.
-export async function analyzeResourceFile({ buffer, mimetype, extractedText, resourceTypeSlug, existingCategories = [] }) {
+export async function analyzeResourceFile({ buffer, mimetype, extractedText, resourceTypeSlug, existingCategories = [], filenameTitle = null }) {
   if (!GEMINI_API_KEY) {
     console.warn('GEMINI_API_KEY not set — skipping AI analysis, manual entry only.')
-    return null
+    return filenameTitle ? { title: filenameTitle, author: null, description: null, tags: [], chapterOrPart: null, course: await lookupCourse(null), category: { categoryId: null, categoryName: null, isNew: false } } : null
   }
   if (!SUPPORTED_ANALYSIS_MIME_TYPES.has(mimetype)) {
-    return null
+    return filenameTitle ? { title: filenameTitle, author: null, description: null, tags: [], chapterOrPart: null, course: await lookupCourse(null), category: { categoryId: null, categoryName: null, isNew: false } } : null
   }
 
   const isImage = mimetype.startsWith('image/')
@@ -145,9 +145,13 @@ export async function analyzeResourceFile({ buffer, mimetype, extractedText, res
   } else if (extractedText) {
     parts.push({ text: extractedText.slice(0, MAX_EXTRACTED_TEXT_CHARS) })
   } else {
-    // Non-image, no extractable text (e.g. a .doc/.ppt we don't parse
-    // client-side) — nothing meaningful to analyze.
-    return null
+    // Non-image, no extractable text (e.g. a scanned/image-only PDF, or
+    // a .doc/.ppt we don't parse client-side) — nothing for Gemini to
+    // read, but the filename is still a real signal worth using rather
+    // than leaving the title blank.
+    return filenameTitle
+      ? { title: filenameTitle, author: null, description: null, tags: [], chapterOrPart: null, course: await lookupCourse(null), category: { categoryId: null, categoryName: null, isNew: false } }
+      : null
   }
 
   const prompt = buildPrompt({ resourceTypeSlug, existingCategories })

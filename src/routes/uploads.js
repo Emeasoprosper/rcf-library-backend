@@ -102,12 +102,21 @@ router.post(
 
     const extractedText = await extractTextContent(uploadedFile)
 
+    // Cleaned-up filename (strip extension, swap - _ for spaces) used as
+    // a last-resort title whenever there's nothing for Gemini to read —
+    // never fabricated content, just the file's own name made readable.
+    const filenameTitle = uploadedFile.originalname
+      .replace(/\.[^./\\]+$/, '')
+      .replace(/[-_]+/g, ' ')
+      .trim() || null
+
     const suggestion = await analyzeResourceFile({
       buffer: uploadedFile.buffer,
       mimetype: uploadedFile.mimetype,
       extractedText,
       resourceTypeSlug,
       existingCategories,
+      filenameTitle,
     })
 
     // suggestion is null whenever there's nothing useful to offer (AI
