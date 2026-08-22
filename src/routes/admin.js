@@ -83,17 +83,19 @@ router.get('/uploads/:id/lock-status', async (req, res) => {
 
 // GET /admin/dashboard
 router.get('/dashboard', async (req, res) => {
-  const [users, resources, downloads, pendingCount] = await Promise.all([
+  const [users, resources, downloads, pendingCount, openRequests] = await Promise.all([
     query('SELECT COUNT(*) FROM users'),
     query(`SELECT COUNT(*) FROM resources WHERE status = 'approved'`),
     query('SELECT COUNT(*) FROM downloads'),
     query(`SELECT COUNT(*) FROM resources WHERE status = 'pending'`),
+    query(`SELECT COUNT(*) FROM material_requests WHERE status = 'open'`),
   ])
   res.json({
     totalUsers: Number(users.rows[0].count),
     totalResources: Number(resources.rows[0].count),
     totalDownloads: Number(downloads.rows[0].count),
     pendingReview: Number(pendingCount.rows[0].count),
+    openRequests: Number(openRequests.rows[0].count),
   })
 })
 
@@ -443,16 +445,62 @@ router.patch('/users/:id/suspend', async (req, res) => {
   res.json({ ok: true })
 })
 
-// GET /admin/requests
+// GET /admin/requests — groups requests that are clearly about the same
+// material (same course_code, or the exact same title once trimmed and
+// lowercased) so the admin sees "4 students want this" instead of 4
+// identical-looking cards. Deliberately exact-match only, not fuzzy or
+// semantic — merging "Think and Grow Rich" with "Napoleon Hill's Think
+// & Grow Rich" belongs to the AI collections/semantic-matching feature,
+// not this one.
 router.get('/requests', async (req, res) => {
   const result = await query(
-    `SELECT mr.id, mr.title, mr.course_code, mr.notes, mr.created_at, u.name AS requester_name
+    `SELECT mr.id, mr.title, mr.course_code, mr.notes, mr.details, mr.created_at,
+            u.id AS requester_id, u.name AS requester_name, u.avatar_url AS requester_avatar_url
      FROM material_requests mr
      JOIN users u ON u.id = mr.user_id
      WHERE mr.status = 'open'
      ORDER BY mr.created_at ASC`
   )
-  res.json({ items: result.rows })
+
+  const groups = new Map()
+
+  for (const row of result.rows) {
+    const key = row.course_code
+      ? `course:${row.course_code.trim().toLowerCase()}`
+      : `title:${row.title.trim().toLowerCase()}`
+
+    if (!groups.has(key)) {
+      groups.set(key, {
+        title: row.title,
+        courseCode: row.course_code,
+        createdAt: row.created_at, // earliest request in the group
+        memberIds: [],
+        requesters: [],
+        notes: [],
+        details: [],
+      })
+    }
+
+    const group = groups.get(key)
+    group.memberIds.push(row.id)
+    group.requesters.push({ id: row.requester_id, name: row.requester_name, avatarUrl: row.requester_avatar_url })
+    if (row.notes) group.notes.push(row.notes)
+    if (row.details && Object.keys(row.details).length > 0) group.details.push(row.details)
+  }
+
+  const items = Array.from(groups.values()).map((g) => ({
+    id: g.memberIds[0], // used only as a stable React key
+    memberIds: g.memberIds,
+    title: g.title,
+    courseCode: g.courseCode,
+    createdAt: g.createdAt,
+    requestCount: g.memberIds.length,
+    requesters: g.requesters,
+    notes: g.notes,
+    details: g.details,
+  }))
+
+  res.json({ items })
 })
 
 // PATCH /admin/requests/:id
