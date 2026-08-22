@@ -161,7 +161,9 @@ export async function analyzeResourceFile({ buffer, mimetype, extractedText, res
     aiResult = await callGemini(parts, prompt)
   } catch (err) {
     console.error('AI analysis failed, falling back to manual entry:', err.message)
-    return null
+    return filenameTitle
+      ? { title: filenameTitle, author: null, description: null, tags: [], chapterOrPart: null, course: await lookupCourse(null), category: { categoryId: null, categoryName: null, isNew: false } }
+      : null
   }
 
   const [course, category] = await Promise.all([
