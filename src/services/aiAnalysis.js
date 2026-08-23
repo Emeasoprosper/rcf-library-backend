@@ -2,7 +2,7 @@
 import { query } from '../db/pool.js'
 import { normalizeCourseCode } from '../utils/courseCode.js'
 
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite'
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite'
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY
 const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`
 
