@@ -8,6 +8,7 @@ import { queuePreviewGeneration } from '../services/previewQueue.js'
 import { extractBasicMetadata, extractTextContent } from '../utils/metadata.js'
 import { analyzeResourceFile, lookupCourse } from '../services/aiAnalysis.js'
 import { detectCollectionAndSection } from '../utils/collectionDetector.js'
+import { findOrCreateAuthor } from '../services/authorLookup.js'
 
 const router = Router()
 
@@ -214,6 +215,11 @@ router.post(
       if (collectionCheck.rows.length > 0) finalCollectionId = collectionId
     }
 
+    // Looked up/created once per unique author name — a Wikipedia photo
+    // lookup only ever fires the first time this exact name is seen,
+    // never on repeat uploads by the same author (see authorLookup.js).
+    const authorId = finalAuthor ? await findOrCreateAuthor(finalAuthor) : null
+
     const inserted = await query(
       `INSERT INTO resources (
          title, author, description, course_code, department_id, category_id,
@@ -221,8 +227,8 @@ router.post(
          storage_provider, file_id, file_url, file_name, file_type, file_size_bytes,
          width_px, height_px, aspect_ratio,
          uploaded_by, is_anonymous, thumbnail_status, media_subtype,
-         chapter, part, volume, edition, collection_id
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,'pending',$21,$22,$23,$24,$25,$26)
+         chapter, part, volume, edition, collection_id, author_id
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,'pending',$21,$22,$23,$24,$25,$26,$27)
        RETURNING id`,
       [
         finalTitle, finalAuthor, description || null, finalCourseCode,
@@ -230,7 +236,7 @@ router.post(
         stored.provider, stored.fileId, stored.fileUrl, uploadedFile.originalname, uploadedFile.mimetype, uploadedFile.size,
         basicMetadata.widthPx, basicMetadata.heightPx, basicMetadata.aspectRatio,
         req.user.id, anonymous, finalMediaSubtype,
-        chapter || null, part || null, volume || null, edition || null, finalCollectionId,
+        chapter || null, part || null, volume || null, edition || null, finalCollectionId, authorId,
       ]
     )
 
@@ -260,6 +266,26 @@ router.post(
         await query(
           'INSERT INTO resource_tags (resource_id, tag_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
           [resourceId, tagId]
+        )
+      }
+    }
+
+    // Deterministic "same author/artist" relationship — no AI needed,
+    // exact-enough via ILIKE same as the category/tag dedupe above. Runs
+    // once at submit time (never per-page-load), covers "More From This
+    // Author" for books and "More like this artist" for audio/video
+    // alike, since both use the same author column.
+    if (finalAuthor?.trim()) {
+      const sameAuthorResult = await query(
+        `SELECT id FROM resources WHERE author ILIKE $1 AND id != $2 AND status = 'approved'`,
+        [finalAuthor.trim(), resourceId]
+      )
+      for (const row of sameAuthorResult.rows) {
+        await query(
+          `INSERT INTO resource_relations (resource_id, related_resource_id, relation_source)
+           VALUES ($1, $2, 'author'), ($2, $1, 'author')
+           ON CONFLICT DO NOTHING`,
+          [resourceId, row.id]
         )
       }
     }

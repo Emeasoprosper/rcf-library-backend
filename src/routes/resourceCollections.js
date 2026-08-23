@@ -5,6 +5,27 @@ import { attachUser } from '../middleware/auth.js'
 
 const router = Router()
 
+// GET /resource-collections — lightweight list for browse rails (Home,
+// Search). No section/related data here — that's only fetched on the
+// full collection page (GET /:id below) to keep this list cheap.
+router.get('/', attachUser, async (req, res) => {
+  // Falls back to the first approved resource's thumbnail when the
+  // collection itself has no cover_url set yet — LATERAL picks one
+  // per collection instead of a separate query per row.
+  const result = await query(
+    `SELECT c.id, c.title, c.author,
+            COALESCE(c.cover_url, fallback.thumbnail_url) AS cover_url
+     FROM resource_collections c
+     LEFT JOIN LATERAL (
+       SELECT thumbnail_url FROM resources
+       WHERE collection_id = c.id AND status = 'approved' AND thumbnail_url IS NOT NULL
+       ORDER BY created_at ASC LIMIT 1
+     ) fallback ON true
+     ORDER BY c.created_at DESC LIMIT 20`
+  )
+  res.json({ items: result.rows })
+})
+
 // GET /resource-collections/:id — full Spotify-style collection page data:
 // header info + resources grouped by section, in section sort_order then
 // each resource's own collection_sort_order. Sections with zero resources
