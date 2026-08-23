@@ -7,6 +7,7 @@ import { resolveUploadCategory } from '../config/driveFolders.js'
 import { queuePreviewGeneration } from '../services/previewQueue.js'
 import { extractBasicMetadata, extractTextContent } from '../utils/metadata.js'
 import { analyzeResourceFile, lookupCourse } from '../services/aiAnalysis.js'
+import { detectCollectionAndSection } from '../utils/collectionDetector.js'
 
 const router = Router()
 
@@ -128,7 +129,12 @@ router.post(
     // unavailable, unsupported file type, or the call itself failed) —
     // the frontend treats that identically to "user hasn't touched AI
     // suggestions yet," never as an error state.
-    res.json({ suggestion })
+    const detected = await detectCollectionAndSection({
+      originalFilename: uploadedFile.originalname,
+      resourceTypeSlug,
+    })
+
+    res.json({ suggestion, detected })
   }
 )
 
@@ -149,6 +155,7 @@ router.post(
     const {
       title, author, courseCode, description, resourceTypeSlug,
       categoryId, departmentId, level, semester, isAnonymous, mediaSubtype, tags,
+      chapter, part, volume, edition, collectionId,
     } = req.body
 
     const typeResult = await query('SELECT id FROM resource_types WHERE slug = $1', [resourceTypeSlug])
@@ -197,14 +204,25 @@ router.post(
       clientThumbnail = { fileId: storedThumbnail.fileId }
     }
 
+    // collectionId only trusted if it's a real row — a stale/tampered id
+    // from a direct API call must never silently attach a resource to a
+    // collection that doesn't exist (FK would reject it anyway, but this
+    // gives a clean null instead of a 500).
+    let finalCollectionId = null
+    if (collectionId) {
+      const collectionCheck = await query('SELECT id FROM resource_collections WHERE id = $1', [collectionId])
+      if (collectionCheck.rows.length > 0) finalCollectionId = collectionId
+    }
+
     const inserted = await query(
       `INSERT INTO resources (
          title, author, description, course_code, department_id, category_id,
          resource_type_id, level, semester,
          storage_provider, file_id, file_url, file_name, file_type, file_size_bytes,
          width_px, height_px, aspect_ratio,
-         uploaded_by, is_anonymous, thumbnail_status, media_subtype
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,'pending',$21)
+         uploaded_by, is_anonymous, thumbnail_status, media_subtype,
+         chapter, part, volume, edition, collection_id
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,'pending',$21,$22,$23,$24,$25,$26)
        RETURNING id`,
       [
         finalTitle, finalAuthor, description || null, finalCourseCode,
@@ -212,6 +230,7 @@ router.post(
         stored.provider, stored.fileId, stored.fileUrl, uploadedFile.originalname, uploadedFile.mimetype, uploadedFile.size,
         basicMetadata.widthPx, basicMetadata.heightPx, basicMetadata.aspectRatio,
         req.user.id, anonymous, finalMediaSubtype,
+        chapter || null, part || null, volume || null, edition || null, finalCollectionId,
       ]
     )
 
