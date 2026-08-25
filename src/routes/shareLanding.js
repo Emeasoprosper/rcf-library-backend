@@ -119,7 +119,7 @@ router.get('/:id', async (req, res) => {
   await renderSeoPage(req, res, {
     resourceRow: result.rows[0],
     canonicalUrl: `${backendOrigin}/library/${req.params.id}`,
-    ctaUrl: `${APP_URL}/resources/${req.params.id}`,
+    ctaUrl: `${APP_URL}/library/${req.params.id}`,
   })
 })
 
