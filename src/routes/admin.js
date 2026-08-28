@@ -454,10 +454,12 @@ router.patch('/users/:id/suspend', async (req, res) => {
 // as a display hint — nothing here writes anything.
 router.get('/resources/needs-organizing', async (req, res) => {
   const result = await query(
-    `SELECT id, title, file_name, author, course_code, chapter, part, volume, edition
-     FROM resources
-     WHERE status = 'approved' AND collection_id IS NULL
-     ORDER BY created_at DESC`
+    `SELECT r.id, r.title, r.file_name, r.author, r.course_code, r.chapter, r.part, r.volume, r.edition,
+            r.thumbnail_url, r.thumbnail_status, rt.slug AS resource_type_slug
+     FROM resources r
+     JOIN resource_types rt ON rt.id = r.resource_type_id
+     WHERE r.status = 'approved' AND r.collection_id IS NULL
+     ORDER BY r.created_at DESC`
   )
 
   const items = result.rows.map((r) => ({
@@ -479,10 +481,67 @@ router.get('/authors', async (req, res) => {
   res.json({ items: result.rows })
 })
 
+// POST /admin/resource-collections — quick-create from the Organize screen.
+router.post('/resource-collections', async (req, res) => {
+  const { title, author } = req.body
+  if (!title?.trim()) return res.status(400).json({ error: 'Title is required' })
+  const inserted = await query(
+    `INSERT INTO resource_collections (title, author, created_by) VALUES ($1, $2, $3) RETURNING id, title, author, cover_url`,
+    [title.trim(), author?.trim() || null, req.user.id]
+  )
+  res.status(201).json({ collection: inserted.rows[0] })
+})
+
+// PATCH /admin/resource-collections/:id — fixes a wrong title/author
+// (e.g. accidentally typed as the author's name instead of the actual
+// collection title). COALESCE means omitted fields are left untouched.
+router.patch('/resource-collections/:id', async (req, res) => {
+  const { title, author, description } = req.body
+  await query(
+    `UPDATE resource_collections SET
+       title = COALESCE($1, title), author = COALESCE($2, author),
+       description = COALESCE($3, description), updated_at = now()
+     WHERE id = $4`,
+    [title?.trim() || null, author?.trim() || null, description?.trim() || null, req.params.id]
+  )
+  res.json({ ok: true })
+})
+
+// POST /admin/resource-collections/:id/sections — quick-add a section.
+router.post('/resource-collections/:id/sections', async (req, res) => {
+  const { name } = req.body
+  if (!name?.trim()) return res.status(400).json({ error: 'Section name is required' })
+
+  const existing = await query(
+    `SELECT id, name FROM resource_collection_sections WHERE collection_id = $1 AND name ILIKE $2`,
+    [req.params.id, name.trim()]
+  )
+  if (existing.rows.length > 0) return res.status(200).json({ section: existing.rows[0] })
+
+  const countResult = await query(
+    `SELECT COUNT(*) FROM resource_collection_sections WHERE collection_id = $1`, [req.params.id]
+  )
+  const inserted = await query(
+    `INSERT INTO resource_collection_sections (collection_id, name, sort_order) VALUES ($1, $2, $3) RETURNING id, name`,
+    [req.params.id, name.trim(), Number(countResult.rows[0].count)]
+  )
+  res.status(201).json({ section: inserted.rows[0] })
+})
+
 // PATCH /admin/resources/:id/organize — assigns author/category/
 // collection/section/chapter etc. COALESCE means any field left out of
 // the request body keeps its current value rather than being wiped —
 // the admin can fill in just what they know about a given resource.
+// Simple, deterministic default when the admin just says "this belongs
+// in that collection" without picking a section themselves — the admin
+// only ever decides grouping, never section bookkeeping.
+function defaultSectionName(resourceTypeSlug) {
+  if (resourceTypeSlug === 'audio') return 'Audio'
+  if (resourceTypeSlug === 'video') return 'Video'
+  if (resourceTypeSlug === 'book') return 'Book'
+  return 'General'
+}
+
 router.patch('/resources/:id/organize', async (req, res) => {
   const { authorName, categoryId, newCategoryName, collectionId, newCollectionTitle, sectionName, chapter, part, volume, edition } = req.body
 
@@ -507,11 +566,23 @@ router.patch('/resources/:id/organize', async (req, res) => {
     finalCollectionId = inserted.rows[0].id
   }
 
+  // If the admin didn't specify a section, figure one out automatically
+  // from the resource's own type — the admin's decision is just "this
+  // goes with that folder"; the system handles the rest.
+  let effectiveSectionName = sectionName?.trim() || null
+  if (finalCollectionId && !effectiveSectionName) {
+    const typeResult = await query(
+      `SELECT rt.slug FROM resources r JOIN resource_types rt ON rt.id = r.resource_type_id WHERE r.id = $1`,
+      [req.params.id]
+    )
+    effectiveSectionName = defaultSectionName(typeResult.rows[0]?.slug)
+  }
+
   let finalSectionId = null
-  if (finalCollectionId && sectionName?.trim()) {
+  if (finalCollectionId && effectiveSectionName) {
     const existingSection = await query(
       `SELECT id FROM resource_collection_sections WHERE collection_id = $1 AND name ILIKE $2`,
-      [finalCollectionId, sectionName.trim()]
+      [finalCollectionId, effectiveSectionName]
     )
     if (existingSection.rows.length > 0) {
       finalSectionId = existingSection.rows[0].id
@@ -522,7 +593,7 @@ router.patch('/resources/:id/organize', async (req, res) => {
       )
       finalSectionId = (await query(
         `INSERT INTO resource_collection_sections (collection_id, name, sort_order) VALUES ($1, $2, $3) RETURNING id`,
-        [finalCollectionId, sectionName.trim(), Number(countResult.rows[0].count)]
+        [finalCollectionId, effectiveSectionName, Number(countResult.rows[0].count)]
       )).rows[0].id
     }
   }
