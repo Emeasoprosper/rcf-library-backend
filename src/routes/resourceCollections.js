@@ -51,7 +51,12 @@ router.get('/:id', attachUser, async (req, res) => {
      FROM resources r
      JOIN resource_types rt ON rt.id = r.resource_type_id
      WHERE r.collection_id = $1 AND r.status = 'approved'
-     ORDER BY r.collection_sort_order ASC, r.chapter ASC NULLS LAST, r.created_at ASC`,
+     ORDER BY r.collection_sort_order ASC,
+              -- chapter is stored as text like "Chapter 10" — sorting
+              -- that alphabetically gives 1, 10, 2, 3... Pulling out
+              -- just the digits and sorting numerically fixes it.
+              NULLIF(regexp_replace(r.chapter, '\D', '', 'g'), '')::int ASC NULLS LAST,
+              r.created_at ASC`,
     [req.params.id]
   )
 

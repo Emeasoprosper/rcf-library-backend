@@ -4,6 +4,8 @@ import multer from 'multer'
 import { query } from '../db/pool.js'
 import { attachUser, requireAuth, requireRole, signPreviewToken, verifyPreviewToken } from '../middleware/auth.js'
 import { deleteFromStorage, uploadToStorage, streamFromStorage } from '../services/storage.js'
+import { findOrCreateAuthor } from '../services/authorLookup.js'
+import { parseFilenameSignals } from '../utils/collectionDetector.js'
 
 const router = Router()
 
@@ -442,6 +444,104 @@ router.patch('/users/:id/suspend', async (req, res) => {
   if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' })
 
   await logAction(req.user.id, suspended ? 'user.suspend' : 'user.unsuspend', 'user', req.params.id)
+  res.json({ ok: true })
+})
+
+// GET /admin/resources/needs-organizing — every approved resource with
+// no collection assigned yet (the leftover set the backfill scripts
+// couldn't confidently auto-assign). Recomputes the same deterministic
+// filename signals collectionDetector.js uses for new uploads, purely
+// as a display hint — nothing here writes anything.
+router.get('/resources/needs-organizing', async (req, res) => {
+  const result = await query(
+    `SELECT id, title, file_name, author, course_code, chapter, part, volume, edition
+     FROM resources
+     WHERE status = 'approved' AND collection_id IS NULL
+     ORDER BY created_at DESC`
+  )
+
+  const items = result.rows.map((r) => ({
+    ...r,
+    detected: parseFilenameSignals(r.file_name),
+  }))
+
+  res.json({ items })
+})
+
+// GET /admin/authors?search= — backs the author suggestion list on the
+// Organize screen.
+router.get('/authors', async (req, res) => {
+  const { search = '' } = req.query
+  const result = await query(
+    `SELECT id, name FROM authors WHERE name ILIKE '%' || $1 || '%' ORDER BY name ASC LIMIT 50`,
+    [search]
+  )
+  res.json({ items: result.rows })
+})
+
+// PATCH /admin/resources/:id/organize — assigns author/category/
+// collection/section/chapter etc. COALESCE means any field left out of
+// the request body keeps its current value rather than being wiped —
+// the admin can fill in just what they know about a given resource.
+router.patch('/resources/:id/organize', async (req, res) => {
+  const { authorName, categoryId, newCategoryName, collectionId, newCollectionTitle, sectionName, chapter, part, volume, edition } = req.body
+
+  let finalAuthorId = null
+  if (authorName?.trim()) {
+    finalAuthorId = await findOrCreateAuthor(authorName.trim())
+  }
+
+  let finalCategoryId = categoryId || null
+  if (!finalCategoryId && newCategoryName?.trim()) {
+    const existingCat = await query(`SELECT id FROM categories WHERE name ILIKE $1`, [newCategoryName.trim()])
+    finalCategoryId = existingCat.rows[0]?.id
+      || (await query(`INSERT INTO categories (name) VALUES ($1) RETURNING id`, [newCategoryName.trim()])).rows[0].id
+  }
+
+  let finalCollectionId = collectionId || null
+  if (!finalCollectionId && newCollectionTitle?.trim()) {
+    const inserted = await query(
+      `INSERT INTO resource_collections (title, author, created_by) VALUES ($1, $2, $3) RETURNING id`,
+      [newCollectionTitle.trim(), authorName?.trim() || null, req.user.id]
+    )
+    finalCollectionId = inserted.rows[0].id
+  }
+
+  let finalSectionId = null
+  if (finalCollectionId && sectionName?.trim()) {
+    const existingSection = await query(
+      `SELECT id FROM resource_collection_sections WHERE collection_id = $1 AND name ILIKE $2`,
+      [finalCollectionId, sectionName.trim()]
+    )
+    if (existingSection.rows.length > 0) {
+      finalSectionId = existingSection.rows[0].id
+    } else {
+      const countResult = await query(
+        `SELECT COUNT(*) FROM resource_collection_sections WHERE collection_id = $1`,
+        [finalCollectionId]
+      )
+      finalSectionId = (await query(
+        `INSERT INTO resource_collection_sections (collection_id, name, sort_order) VALUES ($1, $2, $3) RETURNING id`,
+        [finalCollectionId, sectionName.trim(), Number(countResult.rows[0].count)]
+      )).rows[0].id
+    }
+  }
+
+  await query(
+    `UPDATE resources SET
+       author_id = COALESCE($1, author_id),
+       category_id = COALESCE($2, category_id),
+       collection_id = COALESCE($3, collection_id),
+       collection_section_id = COALESCE($4, collection_section_id),
+       chapter = COALESCE($5, chapter),
+       part = COALESCE($6, part),
+       volume = COALESCE($7, volume),
+       edition = COALESCE($8, edition)
+     WHERE id = $9`,
+    [finalAuthorId, finalCategoryId, finalCollectionId, finalSectionId, chapter || null, part || null, volume || null, edition || null, req.params.id]
+  )
+
+  await logAction(req.user.id, 'resource.organize', 'resource', req.params.id, req.body)
   res.json({ ok: true })
 })
 
