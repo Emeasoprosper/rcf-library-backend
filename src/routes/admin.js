@@ -507,6 +507,25 @@ router.patch('/resource-collections/:id', async (req, res) => {
   res.json({ ok: true })
 })
 
+// DELETE /admin/resource-collections/:id — the collection row and its
+// sections are removed; every resource that belonged to it is left
+// completely intact, just automatically unlinked (collection_id /
+// collection_section_id both fall back to NULL via the existing FK
+// ON DELETE SET NULL) — it simply reappears in "Needs Organizing."
+router.delete('/resource-collections/:id', async (req, res) => {
+  const result = await query(
+    `DELETE FROM resource_collections WHERE id = $1 RETURNING title`,
+    [req.params.id]
+  )
+  if (result.rows.length === 0) return res.status(404).json({ error: 'Collection not found' })
+
+  await logAction(req.user.id, 'collection.delete', 'resource_collection', req.params.id, {
+    title: result.rows[0].title,
+  })
+  res.json({ ok: true })
+})
+
+
 // POST /admin/resource-collections/:id/sections — quick-add a section.
 router.post('/resource-collections/:id/sections', async (req, res) => {
   const { name } = req.body
