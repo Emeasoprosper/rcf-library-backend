@@ -716,6 +716,33 @@ router.patch('/requests/:id', async (req, res) => {
   res.json({ ok: true })
 })
 
+const coverUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (!file.mimetype.startsWith('image/')) return cb(new Error('Cover must be an image'))
+    cb(null, true)
+  },
+})
+
+// POST /admin/resource-collections/:id/cover — uploads to the same
+// public-image storage path already used for generated thumbnails
+// (makePublic: true), then sets it as this collection's real cover.
+// Once cover_url is non-null, GET /resource-collections (list) and
+// GET /resource-collections/:id (detail) both show THIS image instead
+// of ever falling back to the first resource's own thumbnail.
+router.post('/resource-collections/:id/cover', coverUpload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No image provided' })
+
+  const stored = await uploadToStorage(req.file, 'img', { makePublic: true })
+  await query(`UPDATE resource_collections SET cover_url = $1, updated_at = now() WHERE id = $2`, [
+    stored.fileUrl,
+    req.params.id,
+  ])
+
+  res.json({ coverUrl: stored.fileUrl })
+})
+
 const announcementUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 },
