@@ -525,6 +525,19 @@ router.delete('/resource-collections/:id', async (req, res) => {
   res.json({ ok: true })
 })
 
+// PATCH /admin/resources/:id/remove-from-collection — explicit NULL-out,
+// distinct from PATCH .../organize which only ever fills in values via
+// COALESCE and can never clear one. The resource itself is untouched —
+// it just goes back to being unattached, same as if it had never been
+// organized at all.
+router.patch('/resources/:id/remove-from-collection', async (req, res) => {
+  await query(
+    `UPDATE resources SET collection_id = NULL, collection_section_id = NULL WHERE id = $1`,
+    [req.params.id]
+  )
+  await logAction(req.user.id, 'resource.remove_from_collection', 'resource', req.params.id)
+  res.json({ ok: true })
+})
 
 // POST /admin/resource-collections/:id/sections — quick-add a section.
 router.post('/resource-collections/:id/sections', async (req, res) => {
