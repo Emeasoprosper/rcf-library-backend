@@ -2,8 +2,20 @@
 import { Router } from 'express'
 import { query } from '../db/pool.js'
 import { attachUser } from '../middleware/auth.js'
+import { downloadFromStorage } from '../services/storage.js'
 
 const router = Router()
+
+// Sniffs actual image format from magic bytes — same approach as
+// resources.js's sniffImageContentType, duplicated here in miniature
+// rather than exported/shared, since it's a 10-line pure function and
+// this route is the only other place that needs it.
+function sniffCoverContentType(buffer) {
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return 'image/jpeg'
+  if (buffer.length >= 8 && buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) return 'image/png'
+  if (buffer.length >= 4 && buffer.toString('ascii', 0, 4) === 'RIFF') return 'image/webp'
+  return 'image/jpeg'
+}
 
 // GET /resource-collections — lightweight list for browse rails (Home,
 // Search). No section/related data here — that's only fetched on the
@@ -30,6 +42,27 @@ router.get('/', attachUser, async (req, res) => {
      ORDER BY c.created_at DESC LIMIT 20`
   )
   res.json({ items: result.rows })
+})
+
+// GET /resource-collections/:id/cover — proxies the actual cover file
+// through our own origin, same reasoning as resources.js's
+// /:id/thumbnail: reliably same-origin/CORS-safe, no Drive hotlink
+// flakiness. 404s cleanly if no cover_file_id has ever been set —
+// callers already handle a missing cover_url with a fallback icon.
+router.get('/:id/cover', async (req, res) => {
+  const result = await query(`SELECT cover_file_id FROM resource_collections WHERE id = $1`, [req.params.id])
+  const fileId = result.rows[0]?.cover_file_id
+  if (!fileId) return res.status(404).json({ error: 'No cover available' })
+
+  try {
+    const buffer = await downloadFromStorage(fileId)
+    res.setHeader('Content-Type', sniffCoverContentType(buffer))
+    res.setHeader('Cache-Control', 'public, max-age=86400')
+    res.send(buffer)
+  } catch (err) {
+    console.error(`Failed to load cover for collection ${req.params.id}:`, err.message)
+    res.status(502).json({ error: 'Failed to load cover image' })
+  }
 })
 
 // GET /resource-collections/:id — full Spotify-style collection page data:

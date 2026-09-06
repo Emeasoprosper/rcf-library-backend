@@ -738,22 +738,25 @@ const coverUpload = multer({
   },
 })
 
-// POST /admin/resource-collections/:id/cover — uploads to the same
-// public-image storage path already used for generated thumbnails
-// (makePublic: true), then sets it as this collection's real cover.
-// Once cover_url is non-null, GET /resource-collections (list) and
-// GET /resource-collections/:id (detail) both show THIS image instead
-// of ever falling back to the first resource's own thumbnail.
+// POST /admin/resource-collections/:id/cover — uploads privately
+// (makePublic: false) and stores stored.fileId in cover_file_id, exactly
+// the same pattern resources.js already uses for resource thumbnails
+// (thumbnail_file_id -> GET /:id/thumbnail proxy). cover_url now holds
+// OUR OWN proxy URL, never a raw Drive link, so it's never subject to
+// Drive's hotlink/permission quirks that made the image intermittently
+// fail to render.
 router.post('/resource-collections/:id/cover', coverUpload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No image provided' })
 
-  const stored = await uploadToStorage(req.file, 'img', { makePublic: true })
-  await query(`UPDATE resource_collections SET cover_url = $1, updated_at = now() WHERE id = $2`, [
-    stored.fileUrl,
+  const stored = await uploadToStorage(req.file, 'img', { makePublic: false })
+  const coverUrl = `${req.protocol}://${req.get('host')}/api/resource-collections/${req.params.id}/cover`
+  await query(`UPDATE resource_collections SET cover_file_id = $1, cover_url = $2, updated_at = now() WHERE id = $3`, [
+    stored.fileId,
+    coverUrl,
     req.params.id,
   ])
 
-  res.json({ coverUrl: stored.fileUrl })
+  res.json({ coverUrl })
 })
 
 const announcementUpload = multer({
