@@ -116,7 +116,18 @@ router.get('/:id', attachUser, async (req, res) => {
               -- chapter is stored as text like "Chapter 10" — sorting
               -- that alphabetically gives 1, 10, 2, 3... Pulling out
               -- just the digits and sorting numerically fixes it.
-              NULLIF(regexp_replace(r.chapter, '\D', '', 'g'), '')::int ASC NULLS LAST,
+              -- CASE guard added on top of the strip: if the stripped
+              -- result is somehow still non-numeric (e.g. a chapter
+              -- value that never matched the expected "Chapter N"
+              -- shape at all), this falls back to NULL instead of
+              -- ever attempting a cast that can fail — the ORDER BY
+              -- itself can no longer 400 the whole page, regardless
+              -- of what ends up stored in this column.
+              CASE
+                WHEN regexp_replace(COALESCE(r.chapter, ''), '\D', '', 'g') ~ '^\d+$'
+                THEN regexp_replace(r.chapter, '\D', '', 'g')::int
+                ELSE NULL
+              END ASC NULLS LAST,
               r.created_at ASC`,
     [req.params.id, req.user?.id || null]
   )
