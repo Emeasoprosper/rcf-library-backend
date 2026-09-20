@@ -6,6 +6,7 @@ import { attachUser, requireAuth, requireRole, signPreviewToken, verifyPreviewTo
 import { deleteFromStorage, uploadToStorage, streamFromStorage } from '../services/storage.js'
 import { findOrCreateAuthor } from '../services/authorLookup.js'
 import { parseFilenameSignals } from '../utils/collectionDetector.js'
+import { getRecentErrors } from '../services/errorLog.js'
 
 const router = Router()
 
@@ -898,6 +899,11 @@ router.get('/analytics/most-viewed', async (req, res) => {
     console.error('Failed to fetch most-viewed resources:', err)
     res.status(500).json({ error: 'Failed to fetch most-viewed resources' })
   }
+})
+
+// GET /admin/system/errors — recent server errors (in-memory, superadmin only).
+router.get('/system/errors', requireRole('superadmin'), (req, res) => {
+  res.json({ items: getRecentErrors() })
 })
 
 export default router
