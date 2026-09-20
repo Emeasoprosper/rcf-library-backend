@@ -730,13 +730,69 @@ router.patch('/requests/:id', async (req, res) => {
   res.json({ ok: true })
 })
 
-const coverUpload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 },
-  fileFilter: (req, file, cb) => {
-    if (!file.mimetype.startsWith('image/')) return cb(new Error('Cover must be an image'))
-    cb(null, true)
-  },
+// PATCH /admin/requests/:id  { status, fulfilledResourceId?, reason? }
+// fulfilledResourceId can be a raw ID or a full library link; the ID is
+// extracted. Declining requires a reason. The student's notification carries
+// the linked resource's link + cover (fulfilled) or the reason (declined).
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i
+
+router.patch('/requests/:id', async (req, res) => {
+  const { status, fulfilledResourceId, reason } = req.body
+  if (!['fulfilled', 'declined'].includes(status)) return res.status(400).json({ error: 'Invalid status' })
+
+  const declineReason = reason?.trim() || null
+  if (status === 'declined' && !declineReason) {
+    return res.status(400).json({ error: 'Please give a reason for declining.' })
+  }
+
+  let linked = null
+  if (status === 'fulfilled' && fulfilledResourceId?.trim()) {
+    const match = fulfilledResourceId.match(UUID_RE)
+    if (!match) return res.status(400).json({ error: 'That is not a valid resource link or ID.' })
+    const found = await query(
+      `SELECT id, title, thumbnail_url FROM resources WHERE id = $1 AND status = 'approved'`,
+      [match[0]]
+    )
+    if (found.rows.length === 0) return res.status(404).json({ error: 'No approved resource found for that link.' })
+    linked = found.rows[0]
+  }
+
+  const result = await query(
+    `UPDATE material_requests SET status = $1, resolved_by = $2, resolved_at = now(), fulfilled_resource_id = $3
+     WHERE id = $4 RETURNING user_id, title`,
+    [status, req.user.id, linked?.id || null, req.params.id]
+  )
+  if (result.rows.length === 0) return res.status(404).json({ error: 'Request not found' })
+
+  await logAction(req.user.id, 'request.resolve', 'material_request', req.params.id, {
+    status,
+    reason: declineReason,
+    resourceId: linked?.id,
+  })
+
+  if (status === 'fulfilled') {
+    await query(
+      `INSERT INTO notifications (user_id, type, title, body, link_to, thumbnail_url, resource_id)
+       VALUES ($1, 'request_resolved', 'Your request was fulfilled!', $2, $3, $4, $5)`,
+      [
+        result.rows[0].user_id,
+        linked
+          ? `"${linked.title}" is now in the library. Tap to open it.`
+          : `"${result.rows[0].title}" — fulfilled.`,
+        linked ? `/library/${linked.id}` : null,
+        linked?.thumbnail_url || null,
+        linked?.id || null,
+      ]
+    )
+  } else {
+    await query(
+      `INSERT INTO notifications (user_id, type, title, body)
+       VALUES ($1, 'request_resolved', 'Update on your request', $2)`,
+      [result.rows[0].user_id, `"${result.rows[0].title}" was declined. Reason: ${declineReason}`]
+    )
+  }
+
+  res.json({ ok: true })
 })
 
 // POST /admin/resource-collections/:id/cover — uploads privately
