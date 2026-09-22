@@ -189,7 +189,7 @@ router.get('/me/requests', attachUser, requireAuth, async (req, res) => {
   const result = await query(
     `SELECT mr.id, mr.title, mr.course_code, mr.notes, mr.status, mr.created_at,
             mr.category_id, mr.details, c.name AS category,
-            mr.fulfilled_resource_id, r.title AS fulfilled_resource_title
+            mr.fulfilled_resource_id, r.title AS fulfilled_resource_title, r.thumbnail_url AS fulfilled_resource_thumbnail_url
      FROM material_requests mr
      LEFT JOIN resources r ON r.id = mr.fulfilled_resource_id
      LEFT JOIN categories c ON c.id = mr.category_id

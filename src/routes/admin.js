@@ -239,7 +239,7 @@ router.patch('/uploads/:id/approve', async (req, res) => {
     [
       result.rows[0].uploaded_by,
       `"${result.rows[0].title}" is now live in the library.`,
-      `/resources/${req.params.id}`,
+      `/library/${req.params.id}`,
       result.rows[0].thumbnail_url,
       req.params.id,
     ]
@@ -292,11 +292,12 @@ router.patch('/uploads/:id/reject', async (req, res) => {
 
   await logAction(req.user.id, 'resource.reject', 'resource', req.params.id, { reason })
   await query(
-    `INSERT INTO notifications (user_id, type, title, body, thumbnail_url, resource_id)
-     VALUES ($1, 'resource_rejected', 'Your submission needs changes', $2, $3, $4)`,
+    `INSERT INTO notifications (user_id, type, title, body, link_to, thumbnail_url, resource_id)
+     VALUES ($1, 'resource_rejected', 'Your submission needs changes', $2, $3, $4, $5)`,
     [
       result.rows[0].uploaded_by,
       reason || `"${result.rows[0].title}" wasn't approved. Contact an admin for details.`,
+      '/contributions',
       result.rows[0].thumbnail_url,
       req.params.id
     ]
@@ -786,9 +787,9 @@ router.patch('/requests/:id', async (req, res) => {
     )
   } else {
     await query(
-      `INSERT INTO notifications (user_id, type, title, body)
-       VALUES ($1, 'request_resolved', 'Update on your request', $2)`,
-      [result.rows[0].user_id, `"${result.rows[0].title}" was declined. Reason: ${declineReason}`]
+      `INSERT INTO notifications (user_id, type, title, body, link_to)
+       VALUES ($1, 'request_resolved', 'Update on your request', $2, $3)`,
+      [result.rows[0].user_id, `"${result.rows[0].title}" was declined. Reason: ${declineReason}`, '/contribute/request']
     )
   }
 
