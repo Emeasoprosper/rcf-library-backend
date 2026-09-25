@@ -2,6 +2,13 @@
 import { Router } from 'express'
 import { query } from '../db/pool.js'
 import { attachUser, requireAuth } from '../middleware/auth.js'
+import webpush from 'web-push'
+
+webpush.setVapidDetails(
+  'mailto:support@rcf-mouau-library.vercel.app',
+  process.env.VAPID_PUBLIC_KEY,
+  process.env.VAPID_PRIVATE_KEY
+)
 
 const router = Router()
 
@@ -472,5 +479,60 @@ router.delete('/replies/:id', attachUser, requireAuth, async (req, res) => {
   if (result.rows.length === 0) return res.status(404).json({ error: 'Reply not found' })
   res.json({ ok: true })
 })
+
+// POST /community/push/subscribe  { endpoint, keys: { p256dh, auth } }
+router.post('/push/subscribe', attachUser, requireAuth, async (req, res) => {
+  const { endpoint, keys } = req.body
+  if (!endpoint || !keys?.p256dh || !keys?.auth) {
+    return res.status(400).json({ error: 'A valid push subscription is required.' })
+  }
+
+  await query(
+    `INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (endpoint) DO UPDATE SET user_id = EXCLUDED.user_id, p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth`,
+    [req.user.id, endpoint, keys.p256dh, keys.auth]
+  )
+  res.status(201).json({ ok: true })
+})
+
+// DELETE /community/push/subscribe  { endpoint }
+router.delete('/push/subscribe', attachUser, requireAuth, async (req, res) => {
+  const { endpoint } = req.body
+  if (!endpoint) return res.status(400).json({ error: 'endpoint is required.' })
+  await query(`DELETE FROM push_subscriptions WHERE endpoint = $1 AND user_id = $2`, [endpoint, req.user.id])
+  res.json({ ok: true })
+})
+
+// Sends a real push notification to every device a user is subscribed
+// on. Call this from anywhere in the backend that already inserts an
+// in-app notification (e.g. admin.js's approve/reject/request-resolve
+// handlers) — it's additive, never replaces the existing notifications
+// INSERT. A dead/expired subscription (410/404 from the push service)
+// is cleaned up automatically instead of erroring the whole request.
+export async function sendPushToUser(userId, { title, body, url }) {
+  const subs = await query(`SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = $1`, [userId])
+  if (subs.rows.length === 0) return
+
+  const payload = JSON.stringify({ title, body, url })
+
+  await Promise.all(
+    subs.rows.map(async (sub) => {
+      const subscription = {
+        endpoint: sub.endpoint,
+        keys: { p256dh: sub.p256dh, auth: sub.auth },
+      }
+      try {
+        await webpush.sendNotification(subscription, payload)
+      } catch (err) {
+        if (err.statusCode === 404 || err.statusCode === 410) {
+          await query(`DELETE FROM push_subscriptions WHERE endpoint = $1`, [sub.endpoint])
+        } else {
+          console.error('Push send failed:', err.message)
+        }
+      }
+    })
+  )
+}
 
 export default router

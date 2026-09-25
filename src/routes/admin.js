@@ -7,6 +7,7 @@ import { deleteFromStorage, uploadToStorage, streamFromStorage } from '../servic
 import { findOrCreateAuthor } from '../services/authorLookup.js'
 import { parseFilenameSignals } from '../utils/collectionDetector.js'
 import { getRecentErrors } from '../services/errorLog.js'
+import { sendPushToUser } from './community.js'
 
 const router = Router()
 
@@ -244,6 +245,11 @@ router.patch('/uploads/:id/approve', async (req, res) => {
       req.params.id,
     ]
   )
+  sendPushToUser(result.rows[0].uploaded_by, {
+    title: 'Your submission was approved',
+    body: `"${result.rows[0].title}" is now live in the library.`,
+    url: `/library/${req.params.id}`,
+  }).catch((err) => console.error('Push notify failed:', err.message))
   res.json({ ok: true })
 })
 
