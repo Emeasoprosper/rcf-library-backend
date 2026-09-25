@@ -783,6 +783,15 @@ router.patch('/requests/:id', async (req, res) => {
 // OUR OWN proxy URL, never a raw Drive link, so it's never subject to
 // Drive's hotlink/permission quirks that made the image intermittently
 // fail to render.
+const coverUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (!file.mimetype.startsWith('image/')) return cb(new Error('Only image files are supported'))
+    cb(null, true)
+  },
+})
+
 router.post('/resource-collections/:id/cover', coverUpload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No image provided' })
 
