@@ -709,27 +709,7 @@ router.get('/requests', async (req, res) => {
 })
 
 // PATCH /admin/requests/:id
-router.patch('/requests/:id', async (req, res) => {
-  const { status, fulfilledResourceId } = req.body
-  if (!['fulfilled', 'declined'].includes(status)) return res.status(400).json({ error: 'Invalid status' })
 
-  const result = await query(
-    `UPDATE material_requests SET status = $1, resolved_by = $2, resolved_at = now(), fulfilled_resource_id = $3
-     WHERE id = $4 RETURNING user_id, title`,
-    [status, req.user.id, fulfilledResourceId || null, req.params.id]
-  )
-  if (result.rows.length === 0) return res.status(404).json({ error: 'Request not found' })
-
-  await logAction(req.user.id, 'request.resolve', 'material_request', req.params.id, { status })
-  await query(
-    `INSERT INTO notifications (user_id, type, title, body)
-     VALUES ($1, 'request_resolved', $2, $3)`,
-    [result.rows[0].user_id,
-     status === 'fulfilled' ? 'Your request was fulfilled!' : 'Update on your request',
-     `"${result.rows[0].title}" — ${status}.`]
-  )
-  res.json({ ok: true })
-})
 
 // PATCH /admin/requests/:id  { status, fulfilledResourceId?, reason? }
 // fulfilledResourceId can be a raw ID or a full library link; the ID is

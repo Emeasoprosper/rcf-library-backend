@@ -362,6 +362,18 @@ router.patch('/profile', attachUser, requireAuth, async (req, res) => {
   res.json({ user: publicUser(result.rows[0]) })
 })
 
+router.patch('/privacy', attachUser, requireAuth, async (req, res) => {
+  const { showProfile, showHistory } = req.body
+  if (typeof showProfile !== 'boolean' || typeof showHistory !== 'boolean') {
+    return res.status(400).json({ error: 'showProfile and showHistory must both be booleans.' })
+  }
+  const result = await query(
+    `UPDATE users SET show_profile = $1, show_history = $2, updated_at = now() WHERE id = $3 RETURNING *`,
+    [showProfile, showHistory, req.user.id]
+  )
+  res.json({ user: publicUser(result.rows[0]) })
+})
+
 function publicUser(user) {
   return {
     id: user.id,
