@@ -88,7 +88,11 @@ router.get('/', attachUser, async (req, res) => {
   }
   if (category) {
     params.push(category)
-    conditions.push(`c.name = $${params.length}`)
+    conditions.push(`EXISTS (
+      SELECT 1 FROM resource_categories rcf
+      JOIN categories cf ON cf.id = rcf.category_id
+      WHERE rcf.resource_id = r.id AND cf.name = $${params.length}
+    )`)
   }
   if (department) {
     params.push(department)
@@ -126,11 +130,18 @@ router.get('/', attachUser, async (req, res) => {
             r.media_subtype,
             rt.slug AS type, rt.label AS type_label, rt.icon AS type_icon,
             c.name AS category, d.name AS department,
+            COALESCE(cats.names, ARRAY[]::text[]) AS categories,
             EXISTS (SELECT 1 FROM bookmarks bk WHERE bk.user_id = $${userIdIdx} AND bk.resource_id = r.id) AS is_bookmarked
      FROM resources r
      JOIN resource_types rt ON rt.id = r.resource_type_id
      LEFT JOIN categories c ON c.id = r.category_id
      LEFT JOIN departments d ON d.id = r.department_id
+     LEFT JOIN LATERAL (
+       SELECT array_agg(c2.name ORDER BY c2.name) AS names
+       FROM resource_categories rc2
+       JOIN categories c2 ON c2.id = rc2.category_id
+       WHERE rc2.resource_id = r.id
+     ) cats ON true
      WHERE ${whereClause}
      ORDER BY ${orderBy}
      LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
@@ -158,9 +169,10 @@ router.get('/', attachUser, async (req, res) => {
 
 router.get('/meta/categories', async (req, res) => {
   const result = await query(
-    `SELECT c.id, c.name, COUNT(r.id)::int AS count
+    `SELECT c.id, c.name, COUNT(DISTINCT rc.resource_id)::int AS count
      FROM categories c
-     JOIN resources r ON r.category_id = c.id AND r.status = 'approved'
+     JOIN resource_categories rc ON rc.category_id = c.id
+     JOIN resources r ON r.id = rc.resource_id AND r.status = 'approved'
      GROUP BY c.id, c.name
      ORDER BY count DESC, c.name ASC`
   )
@@ -389,6 +401,7 @@ router.get('/:id', attachUser, async (req, res) => {
   const detailResult = await query(
     `SELECT r.*, rt.slug AS type, rt.label AS type_label,
             c.name AS category, d.name AS department,
+            COALESCE(cats.names, ARRAY[]::text[]) AS categories,
             CASE WHEN r.is_anonymous THEN NULL ELSE u.name END AS contributor_name,
             CASE WHEN r.is_anonymous THEN NULL ELSE u.avatar_url END AS contributor_avatar_url,
             (u.role IN ('admin', 'superadmin')) AS is_admin_upload
@@ -397,6 +410,12 @@ router.get('/:id', attachUser, async (req, res) => {
      LEFT JOIN categories c ON c.id = r.category_id
      LEFT JOIN departments d ON d.id = r.department_id
      LEFT JOIN users u ON u.id = r.uploaded_by
+     LEFT JOIN LATERAL (
+       SELECT array_agg(c2.name ORDER BY c2.name) AS names
+       FROM resource_categories rc2
+       JOIN categories c2 ON c2.id = rc2.category_id
+       WHERE rc2.resource_id = r.id
+     ) cats ON true
      WHERE r.id = $1`,
     [req.params.id]
   )
