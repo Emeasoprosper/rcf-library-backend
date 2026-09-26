@@ -953,6 +953,77 @@ router.get('/analytics/most-viewed', async (req, res) => {
   }
 })
 
+// GET /admin/home-rails — every admin-curated rail, including inactive
+// ones, for the management screen.
+router.get('/home-rails', async (req, res) => {
+  const railsResult = await query(`SELECT id, title, sort_order, is_active FROM home_rails ORDER BY sort_order ASC`)
+  const itemsResult = await query(
+    `SELECT hri.rail_id, r.id, r.title, r.thumbnail_url
+     FROM home_rail_items hri
+     JOIN resources r ON r.id = hri.resource_id
+     ORDER BY hri.sort_order ASC`
+  )
+  const itemsByRail = new Map()
+  for (const row of itemsResult.rows) {
+    if (!itemsByRail.has(row.rail_id)) itemsByRail.set(row.rail_id, [])
+    itemsByRail.get(row.rail_id).push({ id: row.id, title: row.title, thumbnail_url: row.thumbnail_url })
+  }
+  res.json({
+    items: railsResult.rows.map((r) => ({ ...r, resources: itemsByRail.get(r.id) || [] })),
+  })
+})
+
+// POST /admin/home-rails  { title }
+router.post('/home-rails', async (req, res) => {
+  const { title } = req.body
+  if (!title?.trim()) return res.status(400).json({ error: 'Title is required' })
+  const countResult = await query('SELECT COUNT(*) FROM home_rails')
+  const inserted = await query(
+    `INSERT INTO home_rails (title, sort_order, created_by) VALUES ($1, $2, $3) RETURNING id, title, sort_order, is_active`,
+    [title.trim(), Number(countResult.rows[0].count), req.user.id]
+  )
+  res.status(201).json({ rail: { ...inserted.rows[0], resources: [] } })
+})
+
+// PATCH /admin/home-rails/:id  { title?, isActive?, sortOrder? }
+router.patch('/home-rails/:id', async (req, res) => {
+  const { title, isActive, sortOrder } = req.body
+  await query(
+    `UPDATE home_rails SET
+       title = COALESCE($1, title),
+       is_active = COALESCE($2, is_active),
+       sort_order = COALESCE($3, sort_order)
+     WHERE id = $4`,
+    [title?.trim() || null, typeof isActive === 'boolean' ? isActive : null, sortOrder ?? null, req.params.id]
+  )
+  res.json({ ok: true })
+})
+
+// DELETE /admin/home-rails/:id
+router.delete('/home-rails/:id', async (req, res) => {
+  await query('DELETE FROM home_rails WHERE id = $1', [req.params.id])
+  res.json({ ok: true })
+})
+
+// POST /admin/home-rails/:id/items  { resourceId }
+router.post('/home-rails/:id/items', async (req, res) => {
+  const { resourceId } = req.body
+  if (!resourceId) return res.status(400).json({ error: 'resourceId is required' })
+  const countResult = await query('SELECT COUNT(*) FROM home_rail_items WHERE rail_id = $1', [req.params.id])
+  await query(
+    `INSERT INTO home_rail_items (rail_id, resource_id, sort_order) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+    [req.params.id, resourceId, Number(countResult.rows[0].count)]
+  )
+  res.json({ ok: true })
+})
+
+// DELETE /admin/home-rails/:id/items/:resourceId
+router.delete('/home-rails/:id/items/:resourceId', async (req, res) => {
+  await query('DELETE FROM home_rail_items WHERE rail_id = $1 AND resource_id = $2', [req.params.id, req.params.resourceId])
+  res.json({ ok: true })
+})
+
+
 // GET /admin/system/errors — recent server errors (in-memory, superadmin only).
 router.get('/system/errors', requireRole('superadmin'), (req, res) => {
   res.json({ items: getRecentErrors() })

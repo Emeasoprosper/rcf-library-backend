@@ -565,4 +565,72 @@ router.put('/:id/progress', attachUser, requireAuth, async (req, res) => {
   res.json({ ok: true })
 })
 
+// GET /resources/home-rails — everything Home.jsx needs to render its
+// category-based rails in one call: admin-curated rails first (in the
+// order an admin set), then system-generated rails — one per category
+// that currently has enough approved resources to be worth a rail —
+// excluding any resource already featured in an admin rail so the same
+// item doesn't appear twice on the page.
+const MIN_RESOURCES_FOR_SYSTEM_RAIL = 4
+const MAX_SYSTEM_RAILS = 6
+
+router.get('/home-rails', async (req, res) => {
+  try {
+    const adminRailsResult = await query(
+      `SELECT hr.id, hr.title, hri.resource_id, hri.sort_order,
+              r.title AS r_title, r.author, r.thumbnail_url, r.thumbnail_status, r.file_type
+       FROM home_rails hr
+       JOIN home_rail_items hri ON hri.rail_id = hr.id
+       JOIN resources r ON r.id = hri.resource_id AND r.status = 'approved'
+       WHERE hr.is_active = true
+       ORDER BY hr.sort_order ASC, hri.sort_order ASC`
+    )
+
+    const adminRailsMap = new Map()
+    const featuredResourceIds = new Set()
+    for (const row of adminRailsResult.rows) {
+      if (!adminRailsMap.has(row.id)) adminRailsMap.set(row.id, { id: row.id, title: row.title, source: 'admin', items: [] })
+      adminRailsMap.get(row.id).items.push({
+        id: row.resource_id, title: row.r_title, author: row.author,
+        thumbnail_url: row.thumbnail_url, thumbnail_status: row.thumbnail_status, file_type: row.file_type,
+      })
+      featuredResourceIds.add(row.resource_id)
+    }
+    const adminRails = Array.from(adminRailsMap.values())
+
+    const categoryCountsResult = await query(
+      `SELECT c.id, c.name, COUNT(DISTINCT rc.resource_id)::int AS count
+       FROM categories c
+       JOIN resource_categories rc ON rc.category_id = c.id
+       JOIN resources r ON r.id = rc.resource_id AND r.status = 'approved'
+       GROUP BY c.id, c.name
+       HAVING COUNT(DISTINCT rc.resource_id) >= $1
+       ORDER BY count DESC
+       LIMIT $2`,
+      [MIN_RESOURCES_FOR_SYSTEM_RAIL, MAX_SYSTEM_RAILS]
+    )
+
+    const systemRails = []
+    for (const cat of categoryCountsResult.rows) {
+      const itemsResult = await query(
+        `SELECT r.id, r.title, r.author, r.thumbnail_url, r.thumbnail_status, r.file_type
+         FROM resources r
+         JOIN resource_categories rc ON rc.resource_id = r.id
+         WHERE rc.category_id = $1 AND r.status = 'approved' AND NOT (r.id = ANY($2::uuid[]))
+         ORDER BY r.view_count DESC, r.created_at DESC
+         LIMIT 12`,
+        [cat.id, featuredResourceIds.size ? Array.from(featuredResourceIds) : []]
+      )
+      if (itemsResult.rows.length >= MIN_RESOURCES_FOR_SYSTEM_RAIL) {
+        systemRails.push({ id: `category-${cat.id}`, title: cat.name, source: 'system', items: itemsResult.rows })
+      }
+    }
+
+    res.json({ rails: [...adminRails, ...systemRails] })
+  } catch (err) {
+    console.error('Failed to fetch home rails:', err)
+    res.status(500).json({ error: 'Failed to fetch home rails' })
+  }
+})
+
 export default router
