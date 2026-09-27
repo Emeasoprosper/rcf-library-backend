@@ -292,8 +292,11 @@ router.get('/me', attachUser, requireAuth, async (req, res) => {
   res.json({ user: publicUser(result.rows[0]) })
 })
 
+const VALID_LEVELS = new Set(['100', '200', '300', '400', '500', 'PG'])
+const VALID_GENDERS = new Set(['Male', 'Female'])
+
 router.patch('/me', attachUser, requireAuth, async (req, res) => {
-  const { name, bio } = req.body
+  const { name, bio, department, level, gender } = req.body
 
   if (!name?.trim()) {
     return res.status(400).json({ error: 'Name is required.' })
@@ -304,17 +307,32 @@ router.patch('/me', attachUser, requireAuth, async (req, res) => {
   if (bio && bio.length > 500) {
     return res.status(400).json({ error: 'Bio must be 500 characters or fewer.' })
   }
+  if (department !== undefined && department !== null && String(department).trim().length > 100) {
+    return res.status(400).json({ error: 'Department is too long.' })
+  }
+  if (level !== undefined && level !== null && level !== '' && !VALID_LEVELS.has(level)) {
+    return res.status(400).json({ error: 'Invalid level.' })
+  }
+  if (gender !== undefined && gender !== null && gender !== '' && !VALID_GENDERS.has(gender)) {
+    return res.status(400).json({ error: 'Invalid gender.' })
+  }
 
   const result = await query(
-    `UPDATE users SET name = $1, bio = $2, updated_at = now() WHERE id = $3 RETURNING *`,
-    [name.trim(), bio?.trim() || null, req.user.id]
+    `UPDATE users SET
+       name = $1, bio = $2,
+       department = COALESCE(NULLIF($3, ''), department),
+       level = COALESCE(NULLIF($4, ''), level),
+       gender = COALESCE(NULLIF($5, ''), gender),
+       updated_at = now()
+     WHERE id = $6 RETURNING *`,
+    [name.trim(), bio?.trim() || null, department?.trim() || '', level || '', gender || '', req.user.id]
   )
 
   res.json({ user: publicUser(result.rows[0]) })
 })
 
 router.patch('/profile', attachUser, requireAuth, async (req, res) => {
-  const { affiliation, category, institutionName, omitInstitution, department, level, studentId } = req.body
+  const { affiliation, category, institutionName, omitInstitution, department, level, studentId, gender, isRcfMember, joinReason, heardFrom } = req.body
 
   if (!['mouau', 'other'].includes(affiliation)) {
     return res.status(400).json({ error: 'affiliation must be "mouau" or "other".' })
@@ -354,9 +372,14 @@ router.patch('/profile', attachUser, requireAuth, async (req, res) => {
   const result = await query(
     `UPDATE users
      SET affiliation = $1, category = $2, institution_name = $3,
-         department = $4, level = $5, student_id = $6
-     WHERE id = $7 RETURNING *`,
-    [affiliation, category, finalInstitution, finalDepartment, finalLevel, finalStudentId, req.user.id]
+         department = $4, level = $5, student_id = $6,
+         gender = $7, is_rcf_member = $8, join_reason = $9, heard_from = $10
+     WHERE id = $11 RETURNING *`,
+    [
+      affiliation, category, finalInstitution, finalDepartment, finalLevel, finalStudentId,
+      gender || null, typeof isRcfMember === 'boolean' ? isRcfMember : null, joinReason || null, heardFrom || null,
+      req.user.id,
+    ]
   )
 
   res.json({ user: publicUser(result.rows[0]) })
@@ -370,6 +393,26 @@ router.patch('/privacy', attachUser, requireAuth, async (req, res) => {
   const result = await query(
     `UPDATE users SET show_profile = $1, show_history = $2, updated_at = now() WHERE id = $3 RETURNING *`,
     [showProfile, showHistory, req.user.id]
+  )
+  res.json({ user: publicUser(result.rows[0]) })
+})
+
+// PATCH /auth/profile-extra — fills in the newer optional details
+// (gender, RCF membership, join reason, heard-from) for a user who
+// already completed the core MOUAU profile earlier, before these
+// fields existed. Deliberately has none of /profile's strict
+// validation — this is a light top-up, one field at a time, never a
+// re-run of the full registration form.
+router.patch('/profile-extra', attachUser, requireAuth, async (req, res) => {
+  const { gender, isRcfMember, joinReason, heardFrom } = req.body
+  const result = await query(
+    `UPDATE users SET
+       gender = COALESCE($1, gender),
+       is_rcf_member = COALESCE($2, is_rcf_member),
+       join_reason = COALESCE($3, join_reason),
+       heard_from = COALESCE($4, heard_from)
+     WHERE id = $5 RETURNING *`,
+    [gender || null, typeof isRcfMember === 'boolean' ? isRcfMember : null, joinReason || null, heardFrom || null, req.user.id]
   )
   res.json({ user: publicUser(result.rows[0]) })
 })
@@ -388,6 +431,10 @@ function publicUser(user) {
     department: user.department,
     level: user.level,
     studentId: user.student_id,
+    gender: user.gender,
+    isRcfMember: user.is_rcf_member,
+    joinReason: user.join_reason,
+    heardFrom: user.heard_from,
     profileComplete: Boolean(
       user.affiliation &&
       user.category &&

@@ -391,7 +391,8 @@ router.get('/users', async (req, res) => {
 
   const result = await query(
     `SELECT id, name, email, avatar_url, affiliation, category, institution_name,
-            student_id, department, level, role, is_suspended, created_at, last_login_at
+            student_id, department, level, role, is_suspended, created_at, last_login_at,
+            gender, is_rcf_member, join_reason, heard_from
      FROM users
      WHERE ($1 = '' OR name ILIKE '%' || $1 || '%' OR email ILIKE '%' || $1 || '%')
      ORDER BY created_at DESC
@@ -410,6 +411,10 @@ router.get('/users', async (req, res) => {
       institutionName: u.institution_name,
       studentId: u.student_id,
       department: u.department,
+      gender: u.gender,
+      isRcfMember: u.is_rcf_member,
+      joinReason: u.join_reason,
+      heardFrom: u.heard_from,
       level: u.level,
       role: u.role,
       isSuspended: u.is_suspended,
@@ -987,16 +992,25 @@ router.post('/home-rails', async (req, res) => {
 
 // PATCH /admin/home-rails/:id  { title?, isActive?, sortOrder? }
 router.patch('/home-rails/:id', async (req, res) => {
-  const { title, isActive, sortOrder } = req.body
+  const { title, isActive, sortOrder, imageUrl } = req.body
   await query(
     `UPDATE home_rails SET
        title = COALESCE($1, title),
        is_active = COALESCE($2, is_active),
-       sort_order = COALESCE($3, sort_order)
-     WHERE id = $4`,
-    [title?.trim() || null, typeof isActive === 'boolean' ? isActive : null, sortOrder ?? null, req.params.id]
+       sort_order = COALESCE($3, sort_order),
+       image_url = COALESCE($4, image_url)
+     WHERE id = $5`,
+    [title?.trim() || null, typeof isActive === 'boolean' ? isActive : null, sortOrder ?? null, imageUrl || null, req.params.id]
   )
   res.json({ ok: true })
+})
+
+router.post('/home-rails/:id/image', coverUpload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No image provided' })
+  const stored = await uploadToStorage(req.file, 'img', { makePublic: false })
+  const imageUrl = `${req.protocol}://${req.get('host')}/api/resource-collections/${req.params.id}/cover`
+  await query(`UPDATE home_rails SET image_url = $1 WHERE id = $2`, [imageUrl, req.params.id])
+  res.json({ imageUrl })
 })
 
 // DELETE /admin/home-rails/:id
@@ -1023,6 +1037,40 @@ router.delete('/home-rails/:id/items/:resourceId', async (req, res) => {
   res.json({ ok: true })
 })
 
+
+// GET /admin/ratings-summary — average + count, admin-only.
+router.get('/ratings-summary', async (req, res) => {
+  const result = await query(
+    `SELECT COUNT(*)::int AS count, COALESCE(AVG(stars), 0)::float AS average FROM app_ratings`
+  )
+  res.json(result.rows[0])
+})
+
+// GET /admin/feedback
+router.get('/feedback', async (req, res) => {
+  const result = await query(
+    `SELECT af.id, af.type, af.message, af.created_at, u.name AS user_name, u.email AS user_email
+     FROM app_feedback af JOIN users u ON u.id = af.user_id
+     ORDER BY af.created_at DESC LIMIT 100`
+  )
+  res.json({ items: result.rows })
+})
+
+// GET /admin/registration-stats — aggregate breakdowns for the charts.
+router.get('/registration-stats', async (req, res) => {
+  const [gender, rcf, heardFrom, joinReason] = await Promise.all([
+    query(`SELECT gender, COUNT(*)::int AS count FROM users WHERE gender IS NOT NULL GROUP BY gender`),
+    query(`SELECT is_rcf_member, COUNT(*)::int AS count FROM users WHERE is_rcf_member IS NOT NULL GROUP BY is_rcf_member`),
+    query(`SELECT heard_from, COUNT(*)::int AS count FROM users WHERE heard_from IS NOT NULL GROUP BY heard_from ORDER BY count DESC`),
+    query(`SELECT join_reason, COUNT(*)::int AS count FROM users WHERE join_reason IS NOT NULL GROUP BY join_reason ORDER BY count DESC`),
+  ])
+  res.json({
+    gender: gender.rows,
+    rcf: rcf.rows,
+    heardFrom: heardFrom.rows,
+    joinReason: joinReason.rows,
+  })
+})
 
 // GET /admin/system/errors — recent server errors (in-memory, superadmin only).
 router.get('/system/errors', requireRole('superadmin'), (req, res) => {

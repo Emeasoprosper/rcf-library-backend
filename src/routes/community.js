@@ -535,4 +535,21 @@ export async function sendPushToUser(userId, { title, body, url }) {
   )
 }
 
+router.post('/ratings', attachUser, requireAuth, async (req, res) => {
+  const { stars } = req.body
+  if (!Number.isInteger(stars) || stars < 1 || stars > 5) return res.status(400).json({ error: 'stars must be 1-5' })
+  await query('INSERT INTO app_ratings (user_id, stars) VALUES ($1, $2)', [req.user.id, stars])
+  res.status(201).json({ ok: true })
+})
+
+router.post('/feedback', attachUser, requireAuth, async (req, res) => {
+  const { type, message } = req.body
+  if (!message?.trim()) return res.status(400).json({ error: 'Message is required' })
+  await query(
+    'INSERT INTO app_feedback (user_id, type, message) VALUES ($1, $2, $3)',
+    [req.user.id, type === 'suggestion' ? 'suggestion' : 'feedback', message.trim()]
+  )
+  res.status(201).json({ ok: true })
+})
+
 export default router
