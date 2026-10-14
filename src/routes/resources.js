@@ -370,6 +370,24 @@ async function loadAndCacheThumbnail(fileId) {
   return { buffer, contentType, width, height }
 }
 
+// GET /resources/home-rails/:id/image — public proxy for a rail's picture
+// (img tags can't send our session cookie), same cache path as thumbnails.
+router.get('/home-rails/:id/image', async (req, res) => {
+  try {
+    const result = await query(`SELECT image_file_id FROM home_rails WHERE id = $1`, [req.params.id])
+    const fileId = result.rows[0]?.image_file_id
+    if (!fileId) return res.status(404).json({ error: 'No image available' })
+
+    const cached = thumbnailCache.get(fileId) || (await loadAndCacheThumbnail(fileId))
+    res.setHeader('Content-Type', cached.contentType)
+    res.setHeader('Cache-Control', 'public, max-age=86400')
+    res.send(cached.buffer)
+  } catch (err) {
+    console.error(`Failed to load home rail image ${req.params.id}:`, err.message)
+    res.status(502).json({ error: 'Failed to load image' })
+  }
+})
+
 router.get('/:id/thumbnail', async (req, res) => {
   const result = await query(
     `SELECT thumbnail_file_id FROM resources WHERE id = $1`,
@@ -389,7 +407,8 @@ router.get('/:id/thumbnail', async (req, res) => {
   }
 })
 
-router.get('/:id', attachUser, async (req, res) => {
+router.get('/:id', attachUser, async (req, res, next) => {
+  if (req.params.id === 'home-rails') return next()
   const updated = await query(
     `UPDATE resources SET view_count = view_count + 1
      WHERE id = $1 AND status = 'approved'

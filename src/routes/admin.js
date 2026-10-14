@@ -961,7 +961,7 @@ router.get('/analytics/most-viewed', async (req, res) => {
 // GET /admin/home-rails — every admin-curated rail, including inactive
 // ones, for the management screen.
 router.get('/home-rails', async (req, res) => {
-  const railsResult = await query(`SELECT id, title, sort_order, is_active FROM home_rails ORDER BY sort_order ASC`)
+  const railsResult = await query(`SELECT id, title, sort_order, is_active, image_url FROM home_rails ORDER BY sort_order ASC`)
   const itemsResult = await query(
     `SELECT hri.rail_id, r.id, r.title, r.thumbnail_url
      FROM home_rail_items hri
@@ -1007,9 +1007,27 @@ router.patch('/home-rails/:id', async (req, res) => {
 
 router.post('/home-rails/:id/image', coverUpload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No image provided' })
+
+  const existing = await query(`SELECT image_file_id FROM home_rails WHERE id = $1`, [req.params.id])
+  if (existing.rows.length === 0) return res.status(404).json({ error: 'Rail not found' })
+
   const stored = await uploadToStorage(req.file, 'img', { makePublic: false })
-  const imageUrl = `${req.protocol}://${req.get('host')}/api/resource-collections/${req.params.id}/cover`
-  await query(`UPDATE home_rails SET image_url = $1 WHERE id = $2`, [imageUrl, req.params.id])
+  const imageUrl = `${req.protocol}://${req.get('host')}/api/resources/home-rails/${req.params.id}/image?v=${Date.now()}`
+  await query(`UPDATE home_rails SET image_file_id = $1, image_url = $2 WHERE id = $3`, [
+    stored.fileId,
+    imageUrl,
+    req.params.id,
+  ])
+
+  const oldFileId = existing.rows[0].image_file_id
+  if (oldFileId) {
+    try {
+      await deleteFromStorage(oldFileId)
+    } catch (err) {
+      console.error(`Failed to delete old rail image ${oldFileId} from Drive:`, err.message)
+    }
+  }
+
   res.json({ imageUrl })
 })
 
