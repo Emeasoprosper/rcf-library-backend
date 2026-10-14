@@ -25,6 +25,7 @@ import communityRoutes from './routes/community.js'
 import analyticsRoutes from './routes/analytics.js'
 import newsRoutes from './routes/news.js'
 import resourceCollectionsRoutes from './routes/resourceCollections.js'
+import presenceRoutes from './routes/presence.js'
 import shareLandingRoutes from './routes/shareLanding.js'
 import shareTokenRoutes from './routes/shareToken.js'
 import sitemapRoutes from './routes/sitemap.js'
@@ -122,6 +123,7 @@ app.use(
   rateLimit({
     windowMs: 15 * 60 * 1000,
     limit: 300,
+    skip: (req) => req.originalUrl.startsWith('/api/presence'),
     standardHeaders: true,
     legacyHeaders: false,
   })
@@ -153,6 +155,7 @@ app.use('/api', communityRoutes)
 app.use('/api/analytics', analyticsRoutes)
 app.use('/api/news', newsRoutes)
 app.use('/api/resource-collections', resourceCollectionsRoutes)
+app.use('/api/presence', presenceRoutes)
 
 // Centralized error handler — now actually reachable for async route
 // errors thanks to express-async-errors above. Every error, from anywhere

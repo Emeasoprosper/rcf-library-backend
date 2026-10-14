@@ -1070,6 +1070,18 @@ router.delete('/home-rails/:id/items/:resourceId', async (req, res) => {
 })
 
 
+// PATCH /admin/settings/online-indicator  { enabled }
+router.patch('/settings/online-indicator', async (req, res) => {
+  const { enabled } = req.body
+  if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be true or false' })
+  await query(
+    `INSERT INTO app_settings (key, value, updated_at) VALUES ('online_indicator_enabled', $1, now())
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+    [String(enabled)]
+  )
+  res.json({ ok: true, enabled })
+})
+
 // GET /admin/ratings-summary — average + count, admin-only.
 router.get('/ratings-summary', async (req, res) => {
   const result = await query(
