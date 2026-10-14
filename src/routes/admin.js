@@ -321,10 +321,17 @@ router.get('/resources', async (req, res) => {
   const result = await query(
     `SELECT r.id, r.title, r.author, r.thumbnail_url, r.file_type, r.file_size_bytes,
             r.status, r.created_at, r.reviewed_at, u.name AS contributor_name,
-            rv.name AS reviewed_by_name, rv.email AS reviewed_by_email
+            rv.name AS reviewed_by_name, rv.email AS reviewed_by_email,
+            COALESCE(cats.names, ARRAY[]::text[]) AS categories
      FROM resources r
      JOIN users u ON u.id = r.uploaded_by
      LEFT JOIN users rv ON rv.id = r.reviewed_by
+     LEFT JOIN LATERAL (
+       SELECT array_agg(c2.name ORDER BY c2.name) AS names
+       FROM resource_categories rc2
+       JOIN categories c2 ON c2.id = rc2.category_id
+       WHERE rc2.resource_id = r.id
+     ) cats ON true
      WHERE r.status = $1
        AND ($2 = '' OR r.title ILIKE '%' || $2 || '%' OR u.name ILIKE '%' || $2 || '%')
      ORDER BY r.created_at DESC
@@ -963,15 +970,22 @@ router.get('/analytics/most-viewed', async (req, res) => {
 router.get('/home-rails', async (req, res) => {
   const railsResult = await query(`SELECT id, title, sort_order, is_active, image_url FROM home_rails ORDER BY sort_order ASC`)
   const itemsResult = await query(
-    `SELECT hri.rail_id, r.id, r.title, r.thumbnail_url
+    `SELECT hri.rail_id, r.id, r.title, r.author, r.thumbnail_url,
+            COALESCE(cats.names, ARRAY[]::text[]) AS categories
      FROM home_rail_items hri
      JOIN resources r ON r.id = hri.resource_id
+     LEFT JOIN LATERAL (
+       SELECT array_agg(c2.name ORDER BY c2.name) AS names
+       FROM resource_categories rc2
+       JOIN categories c2 ON c2.id = rc2.category_id
+       WHERE rc2.resource_id = r.id
+     ) cats ON true
      ORDER BY hri.sort_order ASC`
   )
   const itemsByRail = new Map()
   for (const row of itemsResult.rows) {
     if (!itemsByRail.has(row.rail_id)) itemsByRail.set(row.rail_id, [])
-    itemsByRail.get(row.rail_id).push({ id: row.id, title: row.title, thumbnail_url: row.thumbnail_url })
+    itemsByRail.get(row.rail_id).push({ id: row.id, title: row.title, author: row.author, thumbnail_url: row.thumbnail_url, categories: row.categories || [] })
   }
   res.json({
     items: railsResult.rows.map((r) => ({ ...r, resources: itemsByRail.get(r.id) || [] })),

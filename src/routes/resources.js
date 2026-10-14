@@ -591,12 +591,12 @@ router.put('/:id/progress', attachUser, requireAuth, async (req, res) => {
 // excluding any resource already featured in an admin rail so the same
 // item doesn't appear twice on the page.
 const MIN_RESOURCES_FOR_SYSTEM_RAIL = 4
-const MAX_SYSTEM_RAILS = 6
+const MAX_SYSTEM_RAILS = 0
 
 router.get('/home-rails', async (req, res) => {
   try {
     const adminRailsResult = await query(
-      `SELECT hr.id, hr.title, hri.resource_id, hri.sort_order,
+      `SELECT hr.id, hr.title, hr.image_url, hri.resource_id, hri.sort_order,
               r.title AS r_title, r.author, r.thumbnail_url, r.thumbnail_status, r.file_type
        FROM home_rails hr
        JOIN home_rail_items hri ON hri.rail_id = hr.id
@@ -608,7 +608,7 @@ router.get('/home-rails', async (req, res) => {
     const adminRailsMap = new Map()
     const featuredResourceIds = new Set()
     for (const row of adminRailsResult.rows) {
-      if (!adminRailsMap.has(row.id)) adminRailsMap.set(row.id, { id: row.id, title: row.title, source: 'admin', items: [] })
+      if (!adminRailsMap.has(row.id)) adminRailsMap.set(row.id, { id: row.id, title: row.title, image_url: row.image_url, source: 'admin', items: [] })
       adminRailsMap.get(row.id).items.push({
         id: row.resource_id, title: row.r_title, author: row.author,
         thumbnail_url: row.thumbnail_url, thumbnail_status: row.thumbnail_status, file_type: row.file_type,
