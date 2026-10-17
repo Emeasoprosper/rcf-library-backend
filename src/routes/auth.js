@@ -417,6 +417,94 @@ router.patch('/profile-extra', attachUser, requireAuth, async (req, res) => {
   res.json({ user: publicUser(result.rows[0]) })
 })
 
+// ---- Birthday and contact details ----
+const DAYS_IN_MONTH = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+
+function validMonthDay(month, day) {
+  return (
+    Number.isInteger(month) && Number.isInteger(day) &&
+    month >= 1 && month <= 12 && day >= 1 && day <= DAYS_IN_MONTH[month - 1]
+  )
+}
+
+// Returns the number as +<country code><digits>, or null if it does not
+// look like a real phone number. Nigerian numbers without a country code
+// (08012345678) are accepted and converted to +234.
+function normalizePhone(raw) {
+  const trimmed = String(raw || '').trim()
+  const digits = trimmed.replace(/\D/g, '')
+  if (!digits) return null
+  let international
+  if (trimmed.startsWith('+')) international = digits
+  else if (trimmed.startsWith('00')) international = digits.slice(2)
+  else if (digits.startsWith('234') && digits.length === 13) international = digits
+  else if (digits.startsWith('0') && digits.length === 11) international = `234${digits.slice(1)}`
+  else if (digits.length === 10 && /^[789]/.test(digits)) international = `234${digits}`
+  else return null
+  if (international.length < 8 || international.length > 15) return null
+  return `+${international}`
+}
+
+// PATCH /auth/birthday-contact — a field that is left out keeps its value;
+// a field sent empty is cleared.
+router.patch('/birthday-contact', attachUser, requireAuth, async (req, res) => {
+  const found = await query('SELECT * FROM users WHERE id = $1', [req.user.id])
+  const current = found.rows[0]
+  if (!current) return res.status(404).json({ error: 'User not found' })
+
+  const body = req.body || {}
+  const has = (key) => Object.prototype.hasOwnProperty.call(body, key)
+  const blank = (v) => v === undefined || v === null || String(v).trim() === ''
+
+  let birthMonth = current.birth_month
+  let birthDay = current.birth_day
+  if (has('birthMonth') || has('birthDay')) {
+    if (blank(body.birthMonth) && blank(body.birthDay)) {
+      birthMonth = null
+      birthDay = null
+    } else {
+      const m = Number(body.birthMonth)
+      const d = Number(body.birthDay)
+      if (!validMonthDay(m, d)) return res.status(400).json({ error: 'Pick a real birthday: a month and a day that exist.' })
+      birthMonth = m
+      birthDay = d
+    }
+  }
+
+  const phoneError = 'Enter the number with its country code, for example +2348012345678.'
+  let phone = current.phone_number
+  if (has('phoneNumber')) {
+    if (blank(body.phoneNumber)) phone = null
+    else {
+      phone = normalizePhone(body.phoneNumber)
+      if (!phone) return res.status(400).json({ error: phoneError })
+    }
+  }
+  let whatsapp = current.whatsapp_number
+  if (has('whatsappNumber')) {
+    if (blank(body.whatsappNumber)) whatsapp = null
+    else {
+      whatsapp = normalizePhone(body.whatsappNumber)
+      if (!whatsapp) return res.status(400).json({ error: phoneError })
+    }
+  }
+
+  const birthdayPublic = typeof body.birthdayPublic === 'boolean' ? body.birthdayPublic : current.birthday_public
+  let contactPublic = typeof body.contactPublic === 'boolean' ? body.contactPublic : current.contact_public
+  if (!phone && !whatsapp) contactPublic = false // nothing to share
+
+  const updated = await query(
+    `UPDATE users SET
+       birthday_emailed_year = CASE WHEN birth_month IS DISTINCT FROM $1 OR birth_day IS DISTINCT FROM $2
+                                    THEN NULL ELSE birthday_emailed_year END,
+       birth_month = $1, birth_day = $2, phone_number = $3, whatsapp_number = $4,
+       birthday_public = $5, contact_public = $6, updated_at = now()
+     WHERE id = $7 RETURNING *`,
+    [birthMonth, birthDay, phone, whatsapp, birthdayPublic, contactPublic, req.user.id]
+  )
+  res.json({ user: publicUser(updated.rows[0]) })
+})
+
 function publicUser(user) {
   return {
     id: user.id,
@@ -435,6 +523,12 @@ function publicUser(user) {
     isRcfMember: user.is_rcf_member,
     joinReason: user.join_reason,
     heardFrom: user.heard_from,
+    birthMonth: user.birth_month,
+    birthDay: user.birth_day,
+    phoneNumber: user.phone_number,
+    whatsappNumber: user.whatsapp_number,
+    birthdayPublic: user.birthday_public,
+    contactPublic: user.contact_public,
     profileComplete: Boolean(
       user.affiliation &&
       user.category &&

@@ -27,6 +27,9 @@ import analyticsRoutes from './routes/analytics.js'
 import newsRoutes from './routes/news.js'
 import resourceCollectionsRoutes from './routes/resourceCollections.js'
 import presenceRoutes from './routes/presence.js'
+import birthdaysRoutes from './routes/birthdays.js'
+import announcementMusicRoutes from './routes/announcementMusic.js'
+import { startBirthdayEmailLoop } from './services/birthdayEmails.js'
 import shareLandingRoutes from './routes/shareLanding.js'
 import shareTokenRoutes from './routes/shareToken.js'
 import sitemapRoutes from './routes/sitemap.js'
@@ -154,6 +157,7 @@ app.use('/collections', collectionLandingRoutes)
 app.use('/api/auth', authRoutes)
 app.use('/api/resources', resourcesRoutes)
 app.use('/api/uploads', uploadsRoutes)
+app.use('/api/admin/announcement-music', announcementMusicRoutes)
 app.use('/api/admin/analytics', adminAnalyticsRoutes)
 app.use('/api/admin', adminRoutes)
 app.use('/api', communityRoutes)
@@ -161,6 +165,7 @@ app.use('/api/analytics', analyticsRoutes)
 app.use('/api/news', newsRoutes)
 app.use('/api/resource-collections', resourceCollectionsRoutes)
 app.use('/api/presence', presenceRoutes)
+app.use('/api/birthdays', birthdaysRoutes)
 
 // Centralized error handler — now actually reachable for async route
 // errors thanks to express-async-errors above. Every error, from anywhere
@@ -190,4 +195,5 @@ app.listen(PORT, () => {
   // Starts the 20-min external news refresh loop. Fetches once on boot,
   // then on a timer — never per-request, so this stays flat at 1M users.
   startNewsRefreshLoop()
+  startBirthdayEmailLoop()
 })

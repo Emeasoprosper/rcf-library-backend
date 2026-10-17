@@ -891,7 +891,7 @@ router.post('/announcements', async (req, res) => {
 
 router.delete('/announcements/:id', async (req, res) => {
   const result = await query(
-    `DELETE FROM announcements WHERE id = $1 RETURNING attachment_url`,
+    `DELETE FROM announcements WHERE id = $1 RETURNING attachment_url, music_file_id`,
     [req.params.id]
   )
   if (result.rows.length === 0) return res.status(404).json({ error: 'Announcement not found' })
@@ -905,6 +905,15 @@ router.delete('/announcements/:id', async (req, res) => {
       } catch (err) {
         console.error(`Failed to delete announcement attachment ${match[1]} from Drive:`, err.message)
       }
+    }
+  }
+
+  const musicFileId = result.rows[0].music_file_id
+  if (musicFileId) {
+    try {
+      await deleteFromStorage(musicFileId)
+    } catch (err) {
+      console.error(`Failed to delete announcement music ${musicFileId} from Drive:`, err.message)
     }
   }
 
