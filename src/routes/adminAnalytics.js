@@ -359,4 +359,306 @@ router.get('/events', async (req, res) => {
   })
 })
 
+// ---------- Activity history (daily / weekly / monthly) ----------
+const GRAN = {
+  daily: ['day', '1 day', 14, 60],
+  weekly: ['week', '1 week', 12, 52],
+  monthly: ['month', '1 month', 12, 24],
+}
+
+// GET /admin/analytics/activity?granularity=daily|weekly|monthly&count=N
+router.get('/activity', async (req, res) => {
+  const cfg = GRAN[req.query.granularity]
+  if (!cfg) throw badRequest('granularity must be daily, weekly or monthly')
+  const [unit, step, defCount, maxCount] = cfg
+  const count = Math.min(Math.max(parseInt(req.query.count, 10) || defCount, 1), maxCount)
+
+  const rows = (await query(
+    `WITH buckets AS (
+       SELECT g.d::date AS start, (g.d + interval '${step}' - interval '1 day')::date AS finish
+       FROM generate_series(
+              date_trunc('${unit}', now() AT TIME ZONE '${TZ}') - ${count - 1} * interval '${step}',
+              date_trunc('${unit}', now() AT TIME ZONE '${TZ}'),
+              interval '${step}') AS g(d)
+     ),
+     span AS (SELECT MIN(start) AS s, MAX(finish) AS f FROM buckets),
+     reg AS (SELECT ${localDate('created_at')} AS day, COUNT(*)::int AS c FROM users, span
+             WHERE ${localDate('created_at')} BETWEEN span.s AND span.f GROUP BY 1),
+     dl AS (SELECT ${localDate('downloaded_at')} AS day, COUNT(*)::int AS c FROM downloads, span
+            WHERE ${localDate('downloaded_at')} BETWEEN span.s AND span.f GROUP BY 1),
+     vw AS (SELECT ${localDate('viewed_at')} AS day, COUNT(*)::int AS c FROM resource_views, span
+            WHERE ${localDate('viewed_at')} BETWEEN span.s AND span.f GROUP BY 1)
+     SELECT to_char(b.start, 'YYYY-MM-DD') AS start,
+            to_char(b.finish, 'YYYY-MM-DD') AS finish,
+            (SELECT COUNT(DISTINCT a.user_id)::int FROM user_activity_daily a
+              WHERE a.activity_date BETWEEN b.start AND b.finish) AS active_users,
+            COALESCE((SELECT SUM(c) FROM reg WHERE reg.day BETWEEN b.start AND b.finish), 0)::int AS registrations,
+            COALESCE((SELECT SUM(c) FROM dl WHERE dl.day BETWEEN b.start AND b.finish), 0)::int AS downloads,
+            COALESCE((SELECT SUM(c) FROM vw WHERE vw.day BETWEEN b.start AND b.finish), 0)::int AS views,
+            (b.finish >= (now() AT TIME ZONE '${TZ}')::date) AS in_progress
+     FROM buckets b ORDER BY b.start`
+  )).rows
+
+  res.json({
+    granularity: req.query.granularity,
+    count,
+    items: rows.map((r) => ({
+      start: r.start, finish: r.finish, activeUsers: r.active_users,
+      registrations: r.registrations, downloads: r.downloads, views: r.views, inProgress: r.in_progress,
+    })),
+  })
+})
+
+// ---------- Checkup (plain-language health and growth verdicts) ----------
+const MB = 1048576
+// Defaults match the plans you are on today. Change them on Render with
+// DB_SIZE_LIMIT_MB, SERVER_MEMORY_LIMIT_MB and DRIVE_STORAGE_LIMIT_GB if
+// you upgrade any of them.
+const LIMITS = {
+  dbMb: Number(process.env.DB_SIZE_LIMIT_MB) || 500,
+  memMb: Number(process.env.SERVER_MEMORY_LIMIT_MB) || 512,
+  driveGb: Number(process.env.DRIVE_STORAGE_LIMIT_GB) || 15,
+}
+const nf = (n) => Number(n).toLocaleString()
+const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1)
+const fmtSize = (b) =>
+  b >= 1024 * MB ? `${(b / (1024 * MB)).toFixed(2)} GB` : `${(b / MB).toFixed(b < 10 * MB ? 1 : 0)} MB`
+const capacityLevel = (usedPct) => (usedPct >= 85 ? 'critical' : usedPct >= 70 ? 'watch' : 'good')
+
+function addTrend(add, area, label, cur, prev) {
+  const small = Math.max(cur, prev) < 10 ? ' These are small numbers, so one busy day can swing them.' : ''
+  if (cur === 0 && prev === 0) {
+    return add(area, 'watch', `No ${label} in 14 days`, `There were no ${label} in the last 14 days.`)
+  }
+  if (prev === 0) {
+    return add(area, 'good', `${cap(label)} are picking up`, `${nf(cur)} ${label} in the last 7 days, against none in the 7 days before.${small}`)
+  }
+  const change = Math.round(((cur - prev) / prev) * 100)
+  const base = `${nf(cur)} ${label} in the last 7 days against ${nf(prev)} in the 7 days before (${change > 0 ? '+' : ''}${change}%).${small}`
+  if (change >= 10) return add(area, 'good', `${cap(label)} are growing`, base)
+  if (change <= -10) {
+    return add(area, 'watch', `${cap(label)} are slowing down`, `${base} Worth checking whether something changed, such as a school break, exams, or fewer people sharing the link.`)
+  }
+  return add(area, 'info', `${cap(label)} are steady`, base)
+}
+
+// GET /admin/analytics/insights
+router.get('/insights', async (req, res) => {
+  const items = []
+  const add = (area, level, title, detail, usedPct = null) => items.push({ area, level, title, detail, percent: usedPct })
+  const safe = async (label, fn) => {
+    try {
+      await fn()
+    } catch (err) {
+      console.warn(`Checkup step failed (${label}):`, err.message)
+      add('health', 'info', `Could not check ${label}`, 'This check failed. The server log has the reason.')
+    }
+  }
+
+  // Full days only (today is still in progress, so it would skew every comparison).
+  const d = await one(
+    `SELECT to_char(t, 'YYYY-MM-DD') AS today, to_char(t - 7, 'YYYY-MM-DD') AS w_from,
+            to_char(t - 1, 'YYYY-MM-DD') AS w_to, to_char(t - 14, 'YYYY-MM-DD') AS p_from,
+            to_char(t - 8, 'YYYY-MM-DD') AS p_to, to_char(t - 30, 'YYYY-MM-DD') AS m_from
+     FROM (SELECT (now() AT TIME ZONE '${TZ}')::date AS t) x`
+  )
+  const hist = await one(`SELECT (now() AT TIME ZONE '${TZ}')::date - MIN(activity_date) AS days FROM user_activity_daily`)
+  const historyDays = hist.days == null ? 0 : Number(hist.days)
+
+  // ---- Growth: is the app being noticed? ----
+  await safe('registrations', async () => {
+    const [cur, prev] = await Promise.all([newUsersBetween(d.w_from, d.w_to), newUsersBetween(d.p_from, d.p_to)])
+    addTrend(add, 'growth', 'new registrations', cur, prev)
+  })
+  await safe('downloads', async () => {
+    const [cur, prev] = await Promise.all([downloadsBetween(d.w_from, d.w_to), downloadsBetween(d.p_from, d.p_to)])
+    addTrend(add, 'growth', 'downloads', cur.events, prev.events)
+  })
+  add('growth', 'info', 'Google search traffic is not measured here',
+    'This dashboard only sees people who open the app. How many pages Google has indexed, and how many people found you through it, is in Search Console (Pages and Performance reports).')
+
+  // ---- Engagement: are people coming back? ----
+  await safe('activity', async () => {
+    if (historyDays < 14) {
+      add('engagement', 'info', 'Not enough activity history yet',
+        `Active-user tracking has ${historyDays} day(s) of data. Week-on-week comparisons make sense after 14 days, and stickiness after 30.`)
+      return
+    }
+    const [cur, prev] = await Promise.all([activeBetween(d.w_from, d.w_to), activeBetween(d.p_from, d.p_to)])
+    addTrend(add, 'engagement', 'active users', cur, prev)
+
+    if (historyDays >= 30) {
+      const avgRow = await one(
+        `SELECT COALESCE(SUM(c), 0)::float / 7 AS a FROM (
+           SELECT activity_date, COUNT(*) AS c FROM user_activity_daily
+           WHERE activity_date BETWEEN $1::date AND $2::date GROUP BY 1) x`,
+        [d.w_from, d.w_to]
+      )
+      const mau = await activeBetween(d.m_from, d.w_to)
+      const stick = mau > 0 ? Math.round((avgRow.a / mau) * 1000) / 10 : 0
+      const detail = `On an average day about ${Math.round(avgRow.a)} of the ${nf(mau)} people who used the app in the last 30 days came back (${stick}%). Rule of thumb: 20% or more is strong, under 10% means most people visit rarely.`
+      add('engagement', stick >= 20 ? 'good' : stick >= 10 ? 'info' : 'watch', 'How often people come back', detail)
+    } else {
+      add('engagement', 'info', 'Stickiness needs 30 days of history', `Activity tracking has ${historyDays} days of data so far.`)
+    }
+
+    const r = await one(
+      `WITH first_day AS (SELECT user_id, MIN(activity_date) AS d0 FROM user_activity_daily GROUP BY user_id)
+       SELECT COUNT(*) FILTER (WHERE d0 <= $1::date - 7)::int AS cohort,
+              COUNT(*) FILTER (WHERE d0 <= $1::date - 7 AND EXISTS (
+                SELECT 1 FROM user_activity_daily a WHERE a.user_id = first_day.user_id AND a.activity_date = first_day.d0 + 7))::int AS retained
+       FROM first_day`,
+      [d.today]
+    )
+    if (r.cohort < 10) {
+      add('engagement', 'info', 'Day-7 retention needs more users', `Only ${r.cohort} users first appeared 7 or more days ago. It needs at least 10 to mean anything.`)
+    } else {
+      const rate = Math.round((r.retained / r.cohort) * 1000) / 10
+      add('engagement', rate >= 20 ? 'good' : rate >= 10 ? 'info' : 'watch', `${rate}% came back a week after their first visit`,
+        `${nf(r.retained)} of ${nf(r.cohort)} users were active again exactly 7 days after their first day. Rule of thumb: 20% or more is a healthy sign for a study app.`)
+    }
+  })
+  await safe('people online', async () => {
+    const o = await one(`SELECT COUNT(*)::int AS c FROM users WHERE last_seen_at > now() - interval '150 seconds'`)
+    add('engagement', 'info', 'People online right now', `${nf(o.c)} signed-in ${o.c === 1 ? 'person is' : 'people are'} using the app at this moment.`)
+  })
+
+  // ---- Health: is anything breaking? ----
+  await safe('failure log', async () => {
+    const total = await one(`SELECT COUNT(*)::int AS c FROM system_events`)
+    if (total.c === 0) {
+      add('health', 'info', 'Failure log is empty',
+        'Nothing has been logged yet. That is good news if people have used the app since this update, but the log only started recording when this version went live.')
+      return
+    }
+    const rows = (await query(
+      `SELECT kind, COUNT(*) FILTER (WHERE created_at > now() - interval '24 hours')::int AS d1, COUNT(*)::int AS d7
+       FROM system_events WHERE created_at > now() - interval '7 days' GROUP BY kind`
+    )).rows
+    const get = (k) => rows.find((r) => r.kind === k) || { d1: 0, d7: 0 }
+
+    const a = get('api_error')
+    const baseline = (a.d7 - a.d1) / 6
+    if (a.d1 >= 10 && a.d1 > 3 * baseline) {
+      add('health', 'critical', 'API errors spiked', `${nf(a.d1)} errors in the last 24 hours, against about ${Math.round(baseline)} a day before. Open the Health tab to see the latest ones.`)
+    } else if (a.d1 >= 10) {
+      add('health', 'watch', 'API errors are elevated', `${nf(a.d1)} errors in 24 hours (${nf(a.d7)} in 7 days). Open the Health tab to see what they were.`)
+    } else if (a.d7 === 0) {
+      add('health', 'good', 'No API errors this week', 'Nothing was logged in the last 7 days.')
+    } else {
+      add('health', 'info', 'A few API errors', `${nf(a.d1)} in 24 hours, ${nf(a.d7)} in 7 days. Open the Health tab to see what they were.`)
+    }
+
+    const u = get('upload_failed')
+    if (u.d7 > 0) add('health', 'watch', 'Some uploads failed', `${nf(u.d7)} upload(s) failed on the server in the last 7 days. Open the Health tab for the reasons.`)
+    else add('health', 'good', 'No failed uploads this week', 'Every upload that reached the server went through.')
+
+    const ai = get('ai_failure')
+    if (ai.d7 > 0) add('health', 'watch', 'AI auto-fill is failing sometimes', `${nf(ai.d7)} failure(s) in 7 days. Uploads still work, but the form will not auto-fill. This is often an AI key or quota problem.`)
+    else add('health', 'good', 'AI auto-fill is working', 'No AI failures in the last 7 days.')
+
+    const pv = get('preview_failed')
+    if (pv.d7 > 0) add('health', 'watch', 'Some previews failed to generate', `${nf(pv.d7)} in 7 days. Those resources fall back to a generated cover.`)
+  })
+  await safe('thumbnails', async () => {
+    const t = await one(`SELECT COUNT(*)::int AS c FROM resources WHERE thumbnail_status = 'unavailable' AND status <> 'rejected'`)
+    if (t.c > 0) add('health', 'watch', `${nf(t.c)} resource(s) have no real thumbnail`, 'Their previews could not be generated, so readers see no cover image.')
+  })
+  await safe('review backlog', async () => {
+    const p = await one(
+      `SELECT COUNT(*)::int AS c, COALESCE(EXTRACT(EPOCH FROM (now() - MIN(created_at))) / 86400, 0)::float AS oldest
+       FROM resources WHERE status = 'pending'`
+    )
+    if (p.c === 0) add('health', 'good', 'No uploads waiting for review', 'Every upload has been reviewed.')
+    else if (p.oldest > 7) add('health', 'watch', 'Uploads are waiting a long time', `${nf(p.c)} waiting for review, the oldest for ${Math.floor(p.oldest)} days. Contributors may lose interest if approvals are slow.`)
+    else add('health', 'info', `${nf(p.c)} upload(s) waiting for review`, `The oldest has waited about ${Math.max(1, Math.round(p.oldest))} day(s).`)
+  })
+
+  // ---- Limits: will something run out? ----
+  await safe('database size', async () => {
+    const size = await one(`SELECT pg_database_size(current_database())::bigint AS b`)
+    const used = Number(size.b)
+    const usedPct = Math.round((used / (LIMITS.dbMb * MB)) * 1000) / 10
+    const tables = (await query(
+      `SELECT c.relname AS name, pg_total_relation_size(c.oid)::bigint AS b
+       FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE n.nspname = 'public' AND c.relkind = 'r' ORDER BY b DESC LIMIT 3`
+    )).rows
+    add('capacity', capacityLevel(usedPct), `Database is ${usedPct}% full`,
+      `${fmtSize(used)} used of about ${LIMITS.dbMb} MB. Biggest tables: ${tables.map((t) => `${t.name} (${fmtSize(Number(t.b))})`).join(', ')}. Going past the limit means upgrading the plan or trimming data.`,
+      usedPct)
+  })
+  await safe('file storage', async () => {
+    const s = await one(
+      `SELECT COALESCE(SUM(file_size_bytes), 0)::bigint AS used,
+              COALESCE(MAX(file_size_bytes), 0)::bigint AS biggest,
+              COUNT(*) FILTER (WHERE file_size_bytes > ${50 * MB})::int AS big,
+              COALESCE(SUM(file_size_bytes) FILTER (WHERE created_at > now() - interval '30 days'), 0)::bigint AS added30
+       FROM resources WHERE status <> 'rejected'`
+    )
+    const used = Number(s.used)
+    const limitBytes = LIMITS.driveGb * 1024 * MB
+    const usedPct = Math.round((used / limitBytes) * 1000) / 10
+    let level = capacityLevel(usedPct)
+    let pace = ''
+    const perDay = Number(s.added30) / 30
+    if (perDay > 0) {
+      const daysLeft = Math.floor((limitBytes - used) / perDay)
+      if (daysLeft > 0 && daysLeft < 730) pace = ` At the pace of the last 30 days (about ${fmtSize(perDay)} a day) it would fill in roughly ${nf(daysLeft)} days.`
+      if (daysLeft < 30) level = 'critical'
+      else if (daysLeft < 90 && level === 'good') level = 'watch'
+    }
+    add('capacity', level, `File storage is ${usedPct}% full`,
+      `${fmtSize(used)} of uploaded files out of about ${LIMITS.driveGb} GB. This counts the files only (not thumbnails), and a Google account's storage is shared with its Gmail and Photos.${pace}`,
+      usedPct)
+
+    if (Number(s.biggest) > 50 * MB) {
+      const memBytes = LIMITS.memMb * MB
+      add('capacity', Number(s.biggest) >= 0.4 * memBytes ? 'critical' : 'watch', 'Large files can exhaust server memory',
+        `Your largest file is ${fmtSize(Number(s.biggest))} and ${nf(s.big)} file(s) are over 50 MB. The server reads a whole file into memory each time someone opens or downloads it, so a few people opening big files at the same time can run it out of memory and restart it.`)
+    }
+  })
+
+  const rss = process.memoryUsage().rss
+  const memPct = Math.round((rss / (LIMITS.memMb * MB)) * 1000) / 10
+  add('capacity', capacityLevel(memPct), `Server memory is at ${memPct}%`,
+    `${fmtSize(rss)} in use right now of about ${LIMITS.memMb} MB. This is a snapshot. Memory spikes while big files are uploaded, previewed or streamed, and if it reaches the limit the server process is killed and restarted.`,
+    memPct)
+
+  await safe('database speed', async () => {
+    const times = []
+    for (let i = 0; i < 3; i += 1) {
+      const t = Date.now()
+      await query('SELECT 1')
+      times.push(Date.now() - t)
+    }
+    times.sort((x, y) => x - y)
+    const med = times[1]
+    add('capacity', med < 250 ? 'good' : med < 800 ? 'watch' : 'critical', `Database answers in ${med} ms`,
+      'Measured from the server to the database. Slow answers usually mean the database is busy or far from the server.')
+  })
+  const max = pool.options?.max ?? 10
+  if (pool.waitingCount > 0 || (pool.totalCount >= max && pool.idleCount === 0)) {
+    add('capacity', 'watch', 'Requests are queuing for the database', `${pool.waitingCount} waiting, ${pool.totalCount} of ${max} connections busy.`)
+  } else {
+    add('capacity', 'good', 'Database connections are fine', `${pool.totalCount} of ${max} connections open, ${pool.idleCount} idle, none waiting.`)
+  }
+
+  const counts = { critical: 0, watch: 0, good: 0, info: 0 }
+  for (const i of items) counts[i.level] += 1
+  const goodTitles = items.filter((i) => i.level === 'good').slice(0, 2).map((i) => i.title.toLowerCase())
+  const praise = counts.good > 0 ? `Going well: ${goodTitles.join('; ')}${counts.good > 2 ? `, and ${counts.good - 2} more` : ''}.` : null
+
+  let summary
+  if (counts.critical > 0) {
+    summary = { level: 'critical', headline: 'Needs attention', detail: `${counts.critical} thing(s) should be fixed soon, and ${counts.watch} more are worth watching.`, praise }
+  } else if (counts.watch > 0) {
+    summary = { level: 'watch', headline: 'Mostly healthy, with a few things to watch', detail: `${counts.watch} thing(s) to keep an eye on. Nothing is urgent.`, praise }
+  } else {
+    summary = { level: 'good', headline: 'Healthy', detail: 'Nothing needs attention right now.', praise }
+  }
+
+  res.json({ generatedAt: new Date().toISOString(), summary, items, limits: LIMITS })
+})
+
 export default router
