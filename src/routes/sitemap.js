@@ -23,7 +23,7 @@ router.get('/sitemap.xml', async (req, res) => {
 router.get('/robots.txt', (req, res) => {
   const backendOrigin = `${req.protocol}://${req.get('host')}`
   res.setHeader('Content-Type', 'text/plain')
-  res.send(`User-agent: *\nAllow: /library/\nAllow: /s/\nDisallow: /api/\n\nSitemap: ${APP_URL}/sitemap.xml`)
+  res.send(`User-agent: *\nAllow: /library/\nAllow: /s/\nAllow: /api/resources/\nDisallow: /api/\n\nSitemap: ${APP_URL}/sitemap.xml`)
 })
 
 export default router
