@@ -24,13 +24,14 @@ function escapeHtml(str = '') {
 // signal than a page with genuine standalone content. A real visitor
 // just sees a normal page with a button, not a blind auto-bounce.
 async function renderSeoPage(req, res, { resourceRow, canonicalUrl, ctaUrl }) {
-  const { id, title, author, description, thumbnail_file_id, category, department, level } = resourceRow
+  const { id, title, author, description, course_code, semester, thumbnail_file_id, category, department, level } = resourceRow
   const backendOrigin = `${req.protocol}://${req.get('host')}`
   const shareImageUrl = `${backendOrigin}/api/resources/${id}/thumbnail`
 
   const safeTitle = escapeHtml(title)
   const safeDesc = escapeHtml(author ? `By ${author}` : (description || `Shared from ${SITE_NAME}`))
-  const safeDescLong = escapeHtml(description || safeDesc)
+  const detailBits = [course_code, category, department, level ? `${level} Level` : null, semester ? `${semester} Semester` : null].filter(Boolean).join(' · ')
+  const safeDescLong = escapeHtml([description, detailBits].filter(Boolean).join(' — ') || (author ? `By ${author}` : SITE_NAME))
 
   let dimensionTags = ''
   if (thumbnail_file_id) {
@@ -66,7 +67,7 @@ async function renderSeoPage(req, res, { resourceRow, canonicalUrl, ctaUrl }) {
 <html>
 <head>
   <meta charset="utf-8">
-  <title>${safeTitle} — ${SITE_NAME}</title>
+  <title>${safeTitle}${course_code ? ` (${escapeHtml(course_code)})` : ''} — ${SITE_NAME}</title>
   <link rel="canonical" href="${canonicalUrl}">
   <meta name="description" content="${safeDescLong}">
   <meta property="og:type" content="website">
@@ -106,7 +107,7 @@ async function renderSeoPage(req, res, { resourceRow, canonicalUrl, ctaUrl }) {
 // per resource so Google discovers all of them, not just shared ones.
 router.get('/:id', async (req, res) => {
   const result = await query(
-    `SELECT id, title, author, description, status, thumbnail_file_id, category_id, department_id, level,
+    `SELECT id, title, author, description, course_code, semester, status, thumbnail_file_id, category_id, department_id, level,
             (SELECT name FROM categories WHERE id = category_id) AS category,
             (SELECT name FROM departments WHERE id = department_id) AS department
      FROM resources WHERE id = $1`,
