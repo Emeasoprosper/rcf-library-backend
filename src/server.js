@@ -29,6 +29,7 @@ import presenceRoutes from './routes/presence.js'
 import shareLandingRoutes from './routes/shareLanding.js'
 import shareTokenRoutes from './routes/shareToken.js'
 import sitemapRoutes from './routes/sitemap.js'
+import collectionLandingRoutes from './routes/collectionLanding.js'
 import { startNewsRefreshLoop } from './services/newsService.js'
 
 // Safety net for anything that still somehow escapes express-async-errors
@@ -146,6 +147,7 @@ app.get('/health', (req, res) => res.json({ ok: true }))
 app.use('/', sitemapRoutes)
 app.use('/s', shareTokenRoutes)
 app.use('/library', shareLandingRoutes)
+app.use('/collections', collectionLandingRoutes)
 
 app.use('/api/auth', authRoutes)
 app.use('/api/resources', resourcesRoutes)
