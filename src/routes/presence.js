@@ -19,6 +19,12 @@ router.post('/heartbeat', attachUser, requireAuth, async (req, res) => {
      WHERE id = $1 AND (last_seen_at IS NULL OR last_seen_at < now() - interval '30 seconds')`,
     [req.user.id]
   )
+  await query(
+    `INSERT INTO user_activity_daily (user_id, activity_date)
+     VALUES ($1, (now() AT TIME ZONE 'Africa/Lagos')::date)
+     ON CONFLICT (user_id, activity_date) DO NOTHING`,
+    [req.user.id]
+  )
   res.json({ ok: true })
 })
 

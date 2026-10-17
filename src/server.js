@@ -21,6 +21,7 @@ import authRoutes from './routes/auth.js'
 import resourcesRoutes from './routes/resources.js'
 import uploadsRoutes from './routes/uploads.js'
 import adminRoutes from './routes/admin.js'
+import adminAnalyticsRoutes from './routes/adminAnalytics.js'
 import communityRoutes from './routes/community.js'
 import analyticsRoutes from './routes/analytics.js'
 import newsRoutes from './routes/news.js'
@@ -31,6 +32,7 @@ import shareTokenRoutes from './routes/shareToken.js'
 import sitemapRoutes from './routes/sitemap.js'
 import collectionLandingRoutes from './routes/collectionLanding.js'
 import { startNewsRefreshLoop } from './services/newsService.js'
+import { recordEvent } from './services/systemEvents.js'
 
 // Safety net for anything that still somehow escapes express-async-errors
 // (e.g. an error thrown inside a setTimeout, or truly unexpected cases).
@@ -152,6 +154,7 @@ app.use('/collections', collectionLandingRoutes)
 app.use('/api/auth', authRoutes)
 app.use('/api/resources', resourcesRoutes)
 app.use('/api/uploads', uploadsRoutes)
+app.use('/api/admin/analytics', adminAnalyticsRoutes)
 app.use('/api/admin', adminRoutes)
 app.use('/api', communityRoutes)
 app.use('/api/analytics', analyticsRoutes)
@@ -167,6 +170,16 @@ app.use('/api/presence', presenceRoutes)
 // reach it.
 app.use((err, req, res, next) => {
   console.error(err)
+  {
+    const urlPath = req.originalUrl.split('?')[0]
+    recordEvent({
+      kind: req.method === 'POST' && /^\/api\/uploads\/?$/.test(urlPath) ? 'upload_failed' : 'api_error',
+      source: `${req.method} ${urlPath}`,
+      message: err.message,
+      status: err.status || 400,
+      userId: req.user?.id,
+    })
+  }
   const status = err.status || 400
   res.status(status).json({ error: err.message || 'Something went wrong' })
 })

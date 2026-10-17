@@ -27,6 +27,7 @@ import { randomUUID } from 'node:crypto'
 import { query } from '../db/pool.js'
 import { uploadToStorage, convertOfficeFileToPdf } from './storage.js'
 import { generateCoverCard } from './coverGenerator.js'
+import { recordEvent } from './systemEvents.js'
 import { createCanvas } from '@napi-rs/canvas'
 import { getDocument, GlobalWorkerOptions } from 'pdfjs-dist/legacy/build/pdf.mjs'
 import ffmpeg from 'fluent-ffmpeg'
@@ -58,6 +59,7 @@ function buildThumbnailUrl(resourceId) {
 export function queuePreviewGeneration(resourceId, storedFile, mimeType, fileBuffer, clientThumbnail = null) {
   generatePreview(resourceId, storedFile, mimeType, fileBuffer, clientThumbnail).catch((err) => {
     console.error(`Preview generation failed entirely for resource ${resourceId}:`, err)
+    recordEvent({ kind: 'preview_failed', source: 'previewQueue', message: err.message, resourceId })
     query(`UPDATE resources SET thumbnail_status = 'unavailable' WHERE id = $1`, [resourceId]).catch(() => {})
   })
 }

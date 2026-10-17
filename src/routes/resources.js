@@ -410,12 +410,42 @@ router.get('/:id/thumbnail', async (req, res) => {
 router.get('/:id', attachUser, async (req, res, next) => {
   if (req.params.id === 'home-rails') return next()
   const updated = await query(
-    `UPDATE resources SET view_count = view_count + 1
+    `UPDATE resources SET view_count = view_count
      WHERE id = $1 AND status = 'approved'
      RETURNING id`,
     [req.params.id]
   )
   if (updated.rows.length === 0) return res.status(404).json({ error: 'Resource not found' })
+
+  // One counted view per signed-in user, per resource, per Lagos day.
+  // Anonymous visitors and crawlers are never counted.
+  if (req.user && !/bot|crawl|spider|slurp|preview|facebookexternalhit|whatsapp/i.test(req.headers['user-agent'] || '')) {
+    const logged = await query(
+      `INSERT INTO resource_views (resource_id, user_id, view_date)
+       VALUES ($1, $2, (now() AT TIME ZONE 'Africa/Lagos')::date)
+       ON CONFLICT (resource_id, user_id, view_date) WHERE user_id IS NOT NULL DO NOTHING
+       RETURNING id`,
+      [req.params.id, req.user.id]
+    )
+    if (logged.rows.length > 0) {
+      await query(`UPDATE resources SET view_count = view_count + 1 WHERE id = $1`, [req.params.id])
+    }
+  }
+
+  // One counted view per signed-in user, per resource, per Lagos day.
+  // Anonymous visitors and crawlers are never counted.
+  if (req.user && !/bot|crawl|spider|slurp|preview|facebookexternalhit|whatsapp/i.test(req.headers['user-agent'] || '')) {
+    const logged = await query(
+      `INSERT INTO resource_views (resource_id, user_id, view_date)
+       VALUES ($1, $2, (now() AT TIME ZONE 'Africa/Lagos')::date)
+       ON CONFLICT (resource_id, user_id, view_date) WHERE user_id IS NOT NULL DO NOTHING
+       RETURNING id`,
+      [req.params.id, req.user.id]
+    )
+    if (logged.rows.length > 0) {
+      await query(`UPDATE resources SET view_count = view_count WHERE id = $1`, [req.params.id])
+    }
+  }
 
   const detailResult = await query(
     `SELECT r.*, rt.slug AS type, rt.label AS type_label,

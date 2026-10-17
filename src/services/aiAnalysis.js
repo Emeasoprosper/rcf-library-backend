@@ -1,6 +1,7 @@
 // rcf-library-backend/src/services/aiAnalysis.js
 import { query } from '../db/pool.js'
 import { normalizeCourseCode } from '../utils/courseCode.js'
+import { recordEvent } from './systemEvents.js'
 
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite'
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY
@@ -165,6 +166,7 @@ export async function analyzeResourceFile({ buffer, mimetype, extractedText, res
     aiResult = await callGemini(parts, prompt)
   } catch (err) {
     console.error('AI analysis failed, falling back to manual entry:', err.message)
+    recordEvent({ kind: 'ai_failure', source: 'uploads/analyze', message: err.message })
     // TEMPORARY DEBUG — surfaces the real Gemini error straight into the
     // network response so it's visible without digging through Render
     // logs. Remove _debugError once the root cause is found; never ship
