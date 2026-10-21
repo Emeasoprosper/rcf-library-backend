@@ -50,7 +50,7 @@ router.get('/', attachUser, requireAuth, async (req, res) => {
 // hides the Study space for students. Off by default.
 router.patch('/study-space', attachUser, requireAuth, async (req, res) => {
   const isAdmin = req.user.role === 'admin' || req.user.role === 'superadmin'
-  if (!isAdmin) return res.status(403).json({ error: 'Admins only' })
+  if (req.user.role !== 'superadmin') return res.status(403).json({ error: 'Only the super admin can change this' })
   const enabled = Boolean(req.body?.enabled)
   await query(
     `INSERT INTO app_settings (key, value, updated_at) VALUES ($1, $2, now())
