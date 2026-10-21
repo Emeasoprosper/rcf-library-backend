@@ -91,6 +91,35 @@ router.delete('/notes/:id', async (req, res) => {
   res.json({ ok: true })
 })
 
+// ---------- Past questions already in the library ----------
+// GET /past-questions?resourceId=<uuid>  or  ?courseCode=CSC415
+// Returns approved past-question files for the same course so students
+// can open the real thing instead of (or before) generating with AI.
+router.get('/past-questions', async (req, res) => {
+  let courseCode = String(req.query.courseCode || '').trim()
+  const resourceId = req.query.resourceId ? String(req.query.resourceId) : null
+  if (resourceId && !UUID_RE.test(resourceId)) return res.status(400).json({ error: 'Invalid resource' })
+
+  if (!courseCode && resourceId) {
+    const src = await query(`SELECT course_code FROM resources WHERE id = $1`, [resourceId])
+    courseCode = src.rows[0]?.course_code || ''
+  }
+  if (!courseCode) return res.json({ items: [] })
+
+  const result = await query(
+    `SELECT r.id, r.title, r.course_code, r.thumbnail_url, r.file_type, r.page_count
+     FROM resources r
+     JOIN resource_types rt ON rt.id = r.resource_type_id
+     WHERE rt.slug = 'past_question' AND r.status = 'approved'
+       AND upper(r.course_code) = upper($1)
+       AND ($2::uuid IS NULL OR r.id <> $2::uuid)
+     ORDER BY r.created_at DESC
+     LIMIT 10`,
+    [courseCode, resourceId]
+  )
+  res.json({ items: result.rows })
+})
+
 // ---------- Question sets ----------
 
 router.get('/question-sets', async (req, res) => {

@@ -22,6 +22,51 @@ const OFFICE_MIME_TYPES = new Set([
   'application/vnd.openxmlformats-officedocument.presentationml.presentation',
 ])
 
+const OCR_MAX_PAGES = 30
+const OCR_MAX_BYTES = 15 * 1024 * 1024
+const OCR_MODEL = process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite'
+
+// Reads scanned PDFs and images with Gemini. Returns text, or null if it
+// can't (no key, file too big, AI error) so the file stays 'needs_ocr'.
+async function ocrWithGemini(buffer, mimeType) {
+  const apiKey = process.env.GEMINI_API_KEY
+  if (!apiKey) return null
+  const bytes = Buffer.from(buffer)
+  if (bytes.length > OCR_MAX_BYTES) return null
+
+  const instruction =
+    mimeType === 'application/pdf'
+      ? 'Transcribe all text in this document exactly as written, including handwriting and text inside images or diagrams. Start every page with a line "--- page N ---" (N = page number) followed by that page\'s text. Output only the transcription.'
+      : 'Transcribe all text in this image exactly as written. Output only the transcription.'
+
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 120000)
+  try {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${OCR_MODEL}:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [
+            { parts: [{ inline_data: { mime_type: mimeType, data: bytes.toString('base64') } }, { text: instruction }] },
+          ],
+          generationConfig: { temperature: 0 },
+        }),
+        signal: controller.signal,
+      }
+    )
+    if (!response.ok) return null
+    const data = await response.json()
+    const text = (data.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('').trim()
+    return text.length >= MIN_CHARS_PER_PAGE ? text : null
+  } catch {
+    return null
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 async function extractPdfText(buffer) {
   const pdf = await getDocument({
     data: new Uint8Array(buffer),
@@ -78,8 +123,15 @@ export async function extractResourceText(resource) {
         status: avg >= MIN_CHARS_PER_PAGE ? 'ready' : 'needs_ocr',
         error: null,
       }
+      if (result.status === 'needs_ocr' && out.pageCount <= OCR_MAX_PAGES) {
+        const scanned = await ocrWithGemini(pdfBuffer, 'application/pdf')
+        if (scanned) result = { ...result, content: scanned, pagesExtracted: out.pageCount, status: 'ready' }
+      }
     } else if (mimeType && mimeType.startsWith('image/')) {
-      result = { content: '', pageCount: 1, pagesExtracted: 0, status: 'needs_ocr', error: null }
+      const scanned = await ocrWithGemini(await downloadFromStorage(fileId), mimeType)
+      result = scanned
+        ? { content: `--- page 1 ---\n${scanned}`, pageCount: 1, pagesExtracted: 1, status: 'ready', error: null }
+        : { content: '', pageCount: 1, pagesExtracted: 0, status: 'needs_ocr', error: null }
     } else {
       result = { content: '', pageCount: null, pagesExtracted: 0, status: 'unsupported', error: null }
     }
