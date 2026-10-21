@@ -29,6 +29,8 @@ import resourceCollectionsRoutes from './routes/resourceCollections.js'
 import presenceRoutes from './routes/presence.js'
 import birthdaysRoutes from './routes/birthdays.js'
 import announcementMusicRoutes from './routes/announcementMusic.js'
+import readingSpaceRoutes from './routes/readingSpace.js'
+import studyToolsRoutes from './routes/studyTools.js'
 import { startBirthdayEmailLoop } from './services/birthdayEmails.js'
 import shareLandingRoutes from './routes/shareLanding.js'
 import shareTokenRoutes from './routes/shareToken.js'
@@ -166,6 +168,8 @@ app.use('/api/news', newsRoutes)
 app.use('/api/resource-collections', resourceCollectionsRoutes)
 app.use('/api/presence', presenceRoutes)
 app.use('/api/birthdays', birthdaysRoutes)
+app.use('/api/reading-space', readingSpaceRoutes)
+app.use('/api/study', studyToolsRoutes)
 
 // Centralized error handler — now actually reachable for async route
 // errors thanks to express-async-errors above. Every error, from anywhere
