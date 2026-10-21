@@ -1,6 +1,7 @@
 // RCFMOUAULIBRARYreact/rcf-library-backend/src/services/birthdayEmails.js
 import { query } from '../db/pool.js'
 import { sendMail, mailerConfigured } from './mailer.js'
+import { startPushLoops } from './pushScheduler.js'
 
 const SEND_FROM_HOUR = 7 // Lagos time, 24h clock
 const CHECK_EVERY_MS = 60 * 60 * 1000
@@ -81,6 +82,7 @@ async function runOnce() {
 }
 
 export function startBirthdayEmailLoop() {
+  startPushLoops() // birthday + new-resource pushes run even when email is off
   if (!mailerConfigured()) {
     console.log('Birthday emails are off. Set BREVO_API_KEY and MAIL_FROM_EMAIL to turn them on.')
     return

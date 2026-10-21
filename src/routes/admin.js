@@ -8,6 +8,7 @@ import { findOrCreateAuthor } from '../services/authorLookup.js'
 import { parseFilenameSignals } from '../utils/collectionDetector.js'
 import { getRecentErrors } from '../services/errorLog.js'
 import { sendPushToUser } from './community.js'
+import { sendPush } from '../services/pushService.js'
 
 const router = Router()
 
@@ -297,6 +298,11 @@ router.patch('/uploads/:id/reject', async (req, res) => {
   }
 
   await logAction(req.user.id, 'resource.reject', 'resource', req.params.id, { reason })
+  sendPushToUser(result.rows[0].uploaded_by, {
+    title: 'Your submission needs changes',
+    body: reason || `"${result.rows[0].title}" wasn't approved. Tap for details.`,
+    url: '/contributions',
+  }).catch((err) => console.error('Push notify failed:', err.message))
   await query(
     `INSERT INTO notifications (user_id, type, title, body, link_to, thumbnail_url, resource_id)
      VALUES ($1, 'resource_rejected', 'Your submission needs changes', $2, $3, $4, $5)`,
@@ -763,6 +769,17 @@ router.patch('/requests/:id', async (req, res) => {
   )
   if (result.rows.length === 0) return res.status(404).json({ error: 'Request not found' })
 
+  sendPushToUser(result.rows[0].user_id, {
+    title: status === 'fulfilled' ? 'Your request was fulfilled!' : 'Update on your request',
+    body:
+      status === 'fulfilled'
+        ? linked
+          ? `"${linked.title}" is now in the library.`
+          : `"${result.rows[0].title}" was fulfilled.`
+        : `"${result.rows[0].title}" was declined. Reason: ${declineReason}`,
+    url: linked ? `/library/${linked.id}` : '/contribute/request',
+  }).catch((err) => console.error('Push notify failed:', err.message))
+
   await logAction(req.user.id, 'request.resolve', 'material_request', req.params.id, {
     status,
     reason: declineReason,
@@ -886,6 +903,19 @@ router.post('/announcements', async (req, res) => {
   )
 
   await logAction(req.user.id, 'announcement.create', 'announcement', inserted.rows[0].id)
+
+  // Adverts never push. Scheduled-for-later posts are skipped (no push when they go live yet).
+  const pushCategory = type === 'news' ? 'news' : type === 'announcement' ? 'announcements' : null
+  const notStartedYet = startsAt && new Date(startsAt).getTime() > Date.now()
+  if (pushCategory && !notStartedYet) {
+    sendPush({
+      category: pushCategory,
+      title: title.trim(),
+      body: message.trim().slice(0, 140),
+      url: `/news/${inserted.rows[0].id}`,
+      tag: `ann-${inserted.rows[0].id}`,
+    }).catch((err) => console.error('Announcement push failed:', err.message))
+  }
   res.status(201).json({ id: inserted.rows[0].id })
 })
 

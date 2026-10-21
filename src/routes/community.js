@@ -480,6 +480,26 @@ router.delete('/replies/:id', attachUser, requireAuth, async (req, res) => {
   res.json({ ok: true })
 })
 
+const PUSH_PREF_KEYS = ['news', 'announcements', 'resources', 'birthday', 'updates']
+
+// GET /push/preferences — missing keys count as ON.
+router.get('/push/preferences', attachUser, requireAuth, async (req, res) => {
+  const result = await query(`SELECT push_prefs FROM users WHERE id = $1`, [req.user.id])
+  const saved = result.rows[0]?.push_prefs || {}
+  const prefs = {}
+  for (const key of PUSH_PREF_KEYS) prefs[key] = saved[key] !== false
+  res.json({ prefs })
+})
+
+// PUT /push/preferences  { prefs: { news: true, ... } }
+router.put('/push/preferences', attachUser, requireAuth, async (req, res) => {
+  const incoming = req.body?.prefs || {}
+  const prefs = {}
+  for (const key of PUSH_PREF_KEYS) prefs[key] = incoming[key] !== false
+  await query(`UPDATE users SET push_prefs = $2::jsonb WHERE id = $1`, [req.user.id, JSON.stringify(prefs)])
+  res.json({ ok: true, prefs })
+})
+
 // POST /community/push/subscribe  { endpoint, keys: { p256dh, auth } }
 router.post('/push/subscribe', attachUser, requireAuth, async (req, res) => {
   const { endpoint, keys } = req.body
@@ -511,7 +531,12 @@ router.delete('/push/subscribe', attachUser, requireAuth, async (req, res) => {
 // INSERT. A dead/expired subscription (410/404 from the push service)
 // is cleaned up automatically instead of erroring the whole request.
 export async function sendPushToUser(userId, { title, body, url }) {
-  const subs = await query(`SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = $1`, [userId])
+  const subs = await query(
+    `SELECT ps.endpoint, ps.p256dh, ps.auth
+     FROM push_subscriptions ps JOIN users u ON u.id = ps.user_id
+     WHERE ps.user_id = $1 AND COALESCE((u.push_prefs ->> 'updates')::boolean, true) = true`,
+    [userId]
+  )
   if (subs.rows.length === 0) return
 
   const payload = JSON.stringify({ title, body, url })
