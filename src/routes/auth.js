@@ -529,6 +529,8 @@ function publicUser(user) {
     whatsappNumber: user.whatsapp_number,
     birthdayPublic: user.birthday_public,
     contactPublic: user.contact_public,
+    showProfile: user.show_profile,
+    showHistory: user.show_history,
     profileComplete: Boolean(
       user.affiliation &&
       user.category &&
