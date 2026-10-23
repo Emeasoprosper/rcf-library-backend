@@ -3,6 +3,7 @@ import { Router } from 'express'
 import { query } from '../db/pool.js'
 import { attachUser, requireAuth } from '../middleware/auth.js'
 import webpush from 'web-push'
+import { sendPush } from '../services/pushService.js'
 
 webpush.setVapidDetails(
   'mailto:support@rcf-mouau-library.vercel.app',
@@ -498,6 +499,30 @@ router.put('/push/preferences', attachUser, requireAuth, async (req, res) => {
   for (const key of PUSH_PREF_KEYS) prefs[key] = incoming[key] !== false
   await query(`UPDATE users SET push_prefs = $2::jsonb WHERE id = $1`, [req.user.id, JSON.stringify(prefs)])
   res.json({ ok: true, prefs })
+})
+
+// POST /push/test — real push to the signed-in user's OWN devices only.
+const lastPushTest = new Map()
+router.post('/push/test', attachUser, requireAuth, async (req, res) => {
+  if (Date.now() - (lastPushTest.get(req.user.id) || 0) < 30000) {
+    return res.status(429).json({ error: 'Please wait 30 seconds between tests.' })
+  }
+  lastPushTest.set(req.user.id, Date.now())
+
+  const devices = await query(`SELECT COUNT(*)::int AS n FROM push_subscriptions WHERE user_id = $1`, [req.user.id])
+  if (devices.rows[0].n === 0) {
+    return res.status(400).json({ error: 'No device is registered for your account. Turn notifications on first.' })
+  }
+  const sent = await sendPush({
+    category: 'test',
+    userIds: [req.user.id],
+    title: 'Notifications are working',
+    body: 'This is a test from RCF Library. Tap to open the app.',
+    url: '/settings/notifications',
+    tag: 'push-test',
+    ttl: 300,
+  })
+  res.json({ devices: devices.rows[0].n, sent })
 })
 
 // POST /community/push/subscribe  { endpoint, keys: { p256dh, auth } }

@@ -50,6 +50,10 @@ async function announceNewResources() {
     body: n === 1 ? titles[0] : titles.slice(0, 3).join(', ') + (n > 3 ? ` and ${n - 3} more` : ''),
     url: n === 1 ? `/library/${claimed.rows[0].id}` : '/shelf?sort=recent',
     tag: 'new-resources',
+    image:
+      n === 1 && process.env.PUBLIC_API_BASE_URL
+        ? `${process.env.PUBLIC_API_BASE_URL.replace(/\/$/, '')}/api/resources/${claimed.rows[0].id}/thumbnail`
+        : null,
     ttl: RESOURCE_TTL,
   })
 }

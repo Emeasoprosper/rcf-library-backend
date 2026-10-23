@@ -914,6 +914,7 @@ router.post('/announcements', async (req, res) => {
       body: message.trim().slice(0, 140),
       url: `/news/${inserted.rows[0].id}`,
       tag: `ann-${inserted.rows[0].id}`,
+      image: attachmentMime && attachmentMime.startsWith('image/') ? attachmentUrl : null,
     }).catch((err) => console.error('Announcement push failed:', err.message))
   }
   res.status(201).json({ id: inserted.rows[0].id })

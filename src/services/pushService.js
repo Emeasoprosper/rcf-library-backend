@@ -13,7 +13,7 @@ const CHUNK = 100
 // userIds: omit to send to everyone who opted in to that category.
 // ttl: seconds the push service holds the message for a phone that is
 // offline, after that it is dropped.
-export async function sendPush({ category, userIds = null, title, body, url, tag, ttl = 86400 }) {
+export async function sendPush({ category, userIds = null, title, body, url, tag, image = null, ttl = 86400 }) {
   const params = [category]
   let userFilter = ''
   if (userIds) {
@@ -32,7 +32,7 @@ export async function sendPush({ category, userIds = null, title, body, url, tag
     params
   )
 
-  const payload = JSON.stringify({ title, body, url, tag })
+  const payload = JSON.stringify({ title, body, url, tag, image })
   let sent = 0
 
   for (let i = 0; i < subs.rows.length; i += CHUNK) {
@@ -50,7 +50,7 @@ export async function sendPush({ category, userIds = null, title, body, url, tag
           if (err.statusCode === 404 || err.statusCode === 410) {
             await query(`DELETE FROM push_subscriptions WHERE endpoint = $1`, [sub.endpoint]).catch(() => {})
           } else {
-            console.error('Push send failed:', err.message)
+            console.error('Push send failed:', err.statusCode, err.body || err.message)
           }
         }
       })
