@@ -55,8 +55,15 @@ async function fetchJson(url, tries = 2) {
 // Only items with positive licence evidence may ever be offered.
 export function licenceVerdict(meta, year) {
   const lic = String(meta.licenseurl || '').toLowerCase()
-  if (lic.includes('creativecommons.org/publicdomain/zero') || lic.includes('publicdomain/mark')) {
-    return { ok: true, label: 'Public domain / CC0' }
+  if (
+    lic.includes('creativecommons.org/publicdomain/zero') ||
+    lic.includes('publicdomain/mark') ||
+    lic.includes('creativecommons.org/licenses/publicdomain')
+  ) {
+    // Anyone can type a CC0 label on an upload, so only trust it for old works.
+    const y = Number(year)
+    if (y && y <= 1900) return { ok: true, label: `Public domain / CC0 (published ${y})` }
+    return { ok: false, label: 'CC0 claim on a work published after 1900' }
   }
   if (lic.includes('creativecommons.org/licenses/')) {
     // NoDerivatives licences forbid changes, and our downloads are watermarked.
