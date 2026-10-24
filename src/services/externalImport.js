@@ -1,4 +1,6 @@
 import crypto from 'node:crypto'
+import http from 'node:http'
+import https from 'node:https'
 import { query } from '../db/pool.js'
 import { uploadToStorage, deleteFromStorage } from './storage.js'
 import { resolveUploadCategory } from '../config/driveFolders.js'
@@ -24,33 +26,87 @@ function safeFileName(title) {
   return `${base || 'book'}.pdf`
 }
 
+// Downloads over IPv4 only (avoids the connect-timeout problem seen with Node's default
+// connection method), follows redirects, and stops as soon as the size cap is passed.
+function downloadOnce(url, redirectsLeft = 5) {
+  return new Promise((resolve, reject) => {
+    const client = url.startsWith('http:') ? http : https
+    let deadline
+    const req = client.get(url, { headers: UA, family: 4, timeout: 30000 }, (res) => {
+      const status = res.statusCode || 0
+      if (status >= 300 && status < 400 && res.headers.location) {
+        clearTimeout(deadline)
+        res.resume()
+        if (redirectsLeft <= 0) return reject(new Error('Too many redirects'))
+        return resolve(downloadOnce(new URL(res.headers.location, url).toString(), redirectsLeft - 1))
+      }
+      if (status !== 200) {
+        clearTimeout(deadline)
+        res.resume()
+        return reject(new Error(`archive.org returned ${status} for the file`))
+      }
+      if (Number(res.headers['content-length'] || 0) > MAX_BYTES) {
+        clearTimeout(deadline)
+        res.destroy()
+        return reject(new Error('File is too large'))
+      }
+      const chunks = []
+      let total = 0
+      res.on('data', (chunk) => {
+        total += chunk.length
+        if (total > MAX_BYTES) {
+          res.destroy(new Error('File is too large'))
+          return
+        }
+        chunks.push(chunk)
+      })
+      res.on('end', () => {
+        clearTimeout(deadline)
+        resolve(Buffer.concat(chunks))
+      })
+      res.on('error', (err) => {
+        clearTimeout(deadline)
+        reject(err)
+      })
+    })
+    deadline = setTimeout(() => req.destroy(new Error('Download took too long')), 180000)
+    req.on('timeout', () => req.destroy(new Error('Connection timed out')))
+    req.on('error', (err) => {
+      clearTimeout(deadline)
+      reject(err)
+    })
+  })
+}
+
 async function downloadCapped(url) {
-  const res = await fetch(url, { headers: UA, redirect: 'follow', signal: AbortSignal.timeout(120000) })
-  if (!res.ok) throw new Error(`archive.org returned ${res.status} for the file`)
-  const declared = Number(res.headers.get('content-length') || 0)
-  if (declared > MAX_BYTES) throw new Error('File is too large')
-  const chunks = []
-  let total = 0
-  for await (const chunk of res.body) {
-    total += chunk.length
-    if (total > MAX_BYTES) throw new Error('File is too large')
-    chunks.push(chunk)
+  let lastErr
+  for (let i = 1; i <= 3; i++) {
+    try {
+      return await downloadOnce(url)
+    } catch (err) {
+      lastErr = err
+      if (/too large/i.test(err.message)) throw err
+      if (i < 3) await new Promise((r) => setTimeout(r, 3000))
+    }
   }
-  return Buffer.concat(chunks)
+  throw lastErr
 }
 
 async function runImport(item, userId, job) {
   let stored = null
   let inserted = false
+  let step = 'download'
   try {
     const encodedPath = item.pdfName.split('/').map(encodeURIComponent).join('/')
     const buffer = await downloadCapped(`https://archive.org/download/${encodeURIComponent(item.identifier)}/${encodedPath}`)
     if (buffer.subarray(0, 5).toString('latin1') !== '%PDF-') throw new Error('Downloaded file is not a valid PDF')
 
+    step = 'drive upload'
     const file = { originalname: safeFileName(item.title), mimetype: 'application/pdf', buffer, size: buffer.length }
     const driveCategory = resolveUploadCategory({ mimetype: 'application/pdf', resourceTypeSlug: 'book' })
     stored = await uploadToStorage(file, driveCategory)
 
+    step = 'database'
     const typeResult = await query(`SELECT id FROM resource_types WHERE slug = 'book'`)
     if (typeResult.rows.length === 0) throw new Error('Book resource type is missing')
 
@@ -85,10 +141,11 @@ async function runImport(item, userId, job) {
     job.state = 'done'
     job.resourceId = resourceId
   } catch (err) {
-    console.error(`External import failed for ${item.identifier}:`, err.message)
+    const detail = [err.message, err.code, err.cause?.code].filter(Boolean).join(' | ')
+    console.error(`External import failed for ${item.identifier} at step "${step}":`, detail)
     if (stored && !inserted) await deleteFromStorage(stored.fileId).catch(() => {})
     job.state = 'failed'
-    job.error = err.message
+    job.error = `${step}: ${detail}`
   } finally {
     busy = false
   }
