@@ -9,7 +9,7 @@ const router = Router()
 // Strict, because every search makes outside requests from our server.
 const searchLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  limit: 20,
+  limit: 60,
   standardHeaders: true,
   legacyHeaders: false,
 })
