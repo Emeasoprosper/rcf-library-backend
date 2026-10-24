@@ -1,3 +1,28 @@
+// Re-checks one item at import time. Never trusts anything the browser sent.
+export async function getImportableItem(identifier) {
+  if (!/^[A-Za-z0-9._-]{3,200}$/.test(String(identifier || ''))) throw new Error('Invalid item id')
+  const meta = await fetchJson(`https://archive.org/metadata/${encodeURIComponent(identifier)}`)
+  const m = meta.metadata || {}
+  const title = Array.isArray(m.title) ? m.title[0] : m.title
+  if (!title || BLOCKED_TITLE.test(title)) throw new Error('This item cannot be imported')
+  const year = String(m.year || m.date || '').slice(0, 4)
+  const verdict = licenceVerdict(m, year)
+  if (!verdict.ok) throw new Error(`Not importable: ${verdict.label}`)
+  const pdf = pickPdf(meta.files)
+  if (!pdf) throw new Error('No suitable PDF file on this item')
+  const creator = Array.isArray(m.creator) ? m.creator.join(', ') : m.creator
+  return {
+    identifier,
+    title: String(title).slice(0, 250),
+    author: creator ? String(creator).slice(0, 250) : null,
+    year: year || null,
+    licence: verdict.label,
+    sourceUrl: `https://archive.org/details/${identifier}`,
+    pdfName: pdf.name,
+    pdfBytes: Number(pdf.size),
+  }
+}
+
 // Searches the Internet Archive for books we are allowed to offer: open access,
 // positive licence evidence, a real PDF within our size limits. Read-only.
 const UA = { 'User-Agent': 'RCF-MOUAU-Library/1.0 (+https://rcf-mouau-library.vercel.app)' }
