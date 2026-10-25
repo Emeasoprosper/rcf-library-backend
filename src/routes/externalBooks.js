@@ -3,6 +3,7 @@ import rateLimit from 'express-rate-limit'
 import { attachUser, requireAuth } from '../middleware/auth.js'
 import { searchArchiveBooks } from '../services/archiveSearch.js'
 import { startImport, getJob } from '../services/externalImport.js'
+import { searchAudiobooks } from '../services/librivoxSearch.js'
 
 const router = Router()
 
@@ -50,6 +51,21 @@ router.get('/import/:jobId', attachUser, requireAuth, (req, res) => {
   const job = getJob(req.params.jobId, req.user.id)
   if (!job) return res.status(404).json({ error: 'Job not found' })
   res.json(job)
+})
+
+// GET /api/external/audiobooks/search?q=pilgrim
+// Read-only: lists public-domain audiobooks. Imports nothing yet.
+router.get('/audiobooks/search', searchLimiter, async (req, res) => {
+  const q = String(req.query.q || '').trim()
+  if (q.length < 3) return res.status(400).json({ error: 'Type at least 3 characters to search' })
+
+  try {
+    const items = await searchAudiobooks(q)
+    res.json({ query: q, count: items.length, items })
+  } catch (err) {
+    console.error('Audiobook search failed:', err.message, err.cause?.code || '')
+    res.status(502).json({ error: 'The audiobook search is unavailable right now' })
+  }
 })
 
 export default router
