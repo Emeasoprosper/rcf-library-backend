@@ -247,9 +247,10 @@ router.patch('/uploads/:id/approve', async (req, res) => {
     ]
   )
   sendPushToUser(result.rows[0].uploaded_by, {
-    title: 'Your submission was approved',
-    body: `"${result.rows[0].title}" is now live in the library.`,
+    title: '✅ Your submission was approved',
+    body: `"${result.rows[0].title}" is now live in the library. Thank you for sharing!`,
     url: `/library/${req.params.id}`,
+    image: result.rows[0].thumbnail_url || null,
   }).catch((err) => console.error('Push notify failed:', err.message))
   res.json({ ok: true })
 })
@@ -868,7 +869,8 @@ router.get('/announcements', async (req, res) => {
   const result = await query(
     `SELECT id, type, title, message, attachment_url, attachment_mime, send_email, created_at,
             starts_at, ends_at, daily_start_time, daily_end_time,
-            popup_style, hidden_detail, link_url
+            popup_style, hidden_detail, link_url,
+            post_to_whatsapp, whatsapp_repeat_hours, whatsapp_posted_at
      FROM announcements
      ORDER BY created_at DESC
      LIMIT $1 OFFSET $2`,
@@ -882,23 +884,31 @@ router.post('/announcements', async (req, res) => {
     type, title, message, attachmentUrl, attachmentMime, sendEmail,
     startsAt, endsAt, dailyStartTime, dailyEndTime,
     popupStyle, hiddenDetail, linkUrl,
+    postToWhatsapp, whatsappRepeatHours,
   } = req.body
   if (!['announcement', 'news', 'advert'].includes(type)) return res.status(400).json({ error: 'Invalid type' })
   if (!title?.trim() || !message?.trim()) return res.status(400).json({ error: 'Title and message are required' })
 
   const style = ['rich', 'image_only'].includes(popupStyle) ? popupStyle : 'rich'
+  // Repeats are capped at once every 6h so the bot can't be set to spam the group.
+  const repeatHours = Number(whatsappRepeatHours)
+  const whatsappRepeat = postToWhatsapp && Number.isInteger(repeatHours) && repeatHours > 0
+    ? Math.max(repeatHours, 6)
+    : null
 
   const inserted = await query(
     `INSERT INTO announcements (
        type, title, message, attachment_url, attachment_mime, send_email, created_by,
        starts_at, ends_at, daily_start_time, daily_end_time,
-       popup_style, hidden_detail, link_url
+       popup_style, hidden_detail, link_url,
+       post_to_whatsapp, whatsapp_repeat_hours
      )
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`,
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id`,
     [
       type, title.trim(), message.trim(), attachmentUrl || null, attachmentMime || null, !!sendEmail, req.user.id,
       startsAt || null, endsAt || null, dailyStartTime || null, dailyEndTime || null,
       style, hiddenDetail?.trim() || null, linkUrl?.trim() || null,
+      !!postToWhatsapp, whatsappRepeat,
     ]
   )
 
@@ -918,6 +928,19 @@ router.post('/announcements', async (req, res) => {
     }).catch((err) => console.error('Announcement push failed:', err.message))
   }
   res.status(201).json({ id: inserted.rows[0].id })
+})
+
+// PATCH /admin/announcements/:id/whatsapp — turn group posting on/off later
+// (e.g. stop a repeating advert without deleting it from the app).
+router.patch('/announcements/:id/whatsapp', async (req, res) => {
+  const enabled = !!req.body.postToWhatsapp
+  const result = await query(
+    `UPDATE announcements SET post_to_whatsapp = $2 WHERE id = $1 RETURNING id, post_to_whatsapp`,
+    [req.params.id, enabled]
+  )
+  if (result.rows.length === 0) return res.status(404).json({ error: 'Announcement not found' })
+  await logAction(req.user.id, enabled ? 'announcement.whatsapp_on' : 'announcement.whatsapp_off', 'announcement', req.params.id)
+  res.json(result.rows[0])
 })
 
 router.delete('/announcements/:id', async (req, res) => {
@@ -1157,6 +1180,53 @@ router.get('/registration-stats', async (req, res) => {
 })
 
 // GET /admin/system/errors — recent server errors (in-memory, superadmin only).
+// ---------- WhatsApp bot (Bro Paul), superadmin only ----------
+
+// A heartbeat older than this means the bot process is down.
+const BOT_STALE_SECONDS = 120
+
+// GET /admin/whatsapp — bot status, QR to scan (while linking), and groups.
+router.get('/whatsapp', requireRole('superadmin'), async (req, res) => {
+  const [status, groups] = await Promise.all([
+    query(
+      `SELECT state, qr_data_url, phone, relink_requested, updated_at,
+              (updated_at < now() - make_interval(secs => $1)) AS stale
+       FROM whatsapp_bot_status WHERE id = 1`,
+      [BOT_STALE_SECONDS]
+    ),
+    query(`SELECT jid, name, enabled, member_count, added_at, last_seen_at FROM whatsapp_groups ORDER BY added_at DESC`),
+  ])
+  const row = status.rows[0] || { state: 'offline' }
+  const state = row.stale ? 'offline' : row.state
+  res.json({
+    state,
+    qrDataUrl: state === 'qr' ? row.qr_data_url : null,
+    phone: row.phone || null,
+    relinkRequested: !!row.relink_requested,
+    updatedAt: row.updated_at || null,
+    groups: groups.rows,
+  })
+})
+
+// POST /admin/whatsapp/relink — bot logs out and shows a fresh QR here.
+router.post('/whatsapp/relink', requireRole('superadmin'), async (req, res) => {
+  await query(`UPDATE whatsapp_bot_status SET relink_requested = TRUE WHERE id = 1`)
+  await logAction(req.user.id, 'whatsapp.relink', 'whatsapp_bot', '1')
+  res.json({ ok: true })
+})
+
+// PATCH /admin/whatsapp/groups/:jid  { enabled }
+router.patch('/whatsapp/groups/:jid', requireRole('superadmin'), async (req, res) => {
+  const enabled = !!req.body.enabled
+  const result = await query(
+    `UPDATE whatsapp_groups SET enabled = $2 WHERE jid = $1 RETURNING jid, enabled`,
+    [req.params.jid, enabled]
+  )
+  if (result.rows.length === 0) return res.status(404).json({ error: 'Group not found' })
+  await logAction(req.user.id, enabled ? 'whatsapp.group_on' : 'whatsapp.group_off', 'whatsapp_group', req.params.jid)
+  res.json(result.rows[0])
+})
+
 router.get('/system/errors', requireRole('superadmin'), (req, res) => {
   res.json({ items: getRecentErrors() })
 })

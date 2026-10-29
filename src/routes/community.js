@@ -555,7 +555,7 @@ router.delete('/push/subscribe', attachUser, requireAuth, async (req, res) => {
 // handlers) — it's additive, never replaces the existing notifications
 // INSERT. A dead/expired subscription (410/404 from the push service)
 // is cleaned up automatically instead of erroring the whole request.
-export async function sendPushToUser(userId, { title, body, url }) {
+export async function sendPushToUser(userId, { title, body, url, image = null }) {
   const subs = await query(
     `SELECT ps.endpoint, ps.p256dh, ps.auth
      FROM push_subscriptions ps JOIN users u ON u.id = ps.user_id
@@ -564,7 +564,7 @@ export async function sendPushToUser(userId, { title, body, url }) {
   )
   if (subs.rows.length === 0) return
 
-  const payload = JSON.stringify({ title, body, url })
+  const payload = JSON.stringify({ title, body, url, image })
 
   await Promise.all(
     subs.rows.map(async (sub) => {

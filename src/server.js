@@ -37,6 +37,7 @@ import shareTokenRoutes from './routes/shareToken.js'
 import sitemapRoutes from './routes/sitemap.js'
 import externalBooksRoutes from './routes/externalBooks.js'
 import collectionLandingRoutes from './routes/collectionLanding.js'
+import botRoutes from './routes/bot.js'
 import { startNewsRefreshLoop } from './services/newsService.js'
 import { recordEvent } from './services/systemEvents.js'
 
@@ -132,7 +133,8 @@ app.use(
   rateLimit({
     windowMs: 15 * 60 * 1000,
     limit: 300,
-    skip: (req) => req.originalUrl.startsWith('/api/presence'),
+    // /api/bot is the WhatsApp bot's heartbeat, already locked by BOT_API_KEY.
+    skip: (req) => req.originalUrl.startsWith('/api/presence') || req.originalUrl.startsWith('/api/bot'),
     standardHeaders: true,
     legacyHeaders: false,
   })
@@ -172,6 +174,7 @@ app.use('/api/birthdays', birthdaysRoutes)
 app.use('/api/reading-space', readingSpaceRoutes)
 app.use('/api/study', studyToolsRoutes)
 app.use('/api/external', externalBooksRoutes)
+app.use('/api/bot', botRoutes)
 
 // Centralized error handler — now actually reachable for async route
 // errors thanks to express-async-errors above. Every error, from anywhere

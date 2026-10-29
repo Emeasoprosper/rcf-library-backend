@@ -37,23 +37,25 @@ async function announceNewResources() {
   const claimed = await query(
     `UPDATE resources SET push_announced = true
      WHERE id = ANY($1) AND push_announced = false
-     RETURNING id, title`,
+     RETURNING id, title, thumbnail_file_id`,
     [pending.rows.map((r) => r.id)]
   )
   if (claimed.rows.length === 0) return
 
   const n = claimed.rows.length
   const titles = claimed.rows.map((r) => r.title)
+  // Lead with a book that has a cover, so the push shows its image
+  // ("GST 101 Past Questions + 4 more").
+  const lead = claimed.rows.find((r) => r.thumbnail_file_id) || claimed.rows[0]
+  const others = titles.filter((t) => t !== lead.title)
+  const apiBase = (process.env.PUBLIC_API_BASE_URL || '').replace(/\/$/, '')
   await sendPush({
     category: 'resources',
-    title: n === 1 ? 'New in the library' : `${n} new resources added`,
-    body: n === 1 ? titles[0] : titles.slice(0, 3).join(', ') + (n > 3 ? ` and ${n - 3} more` : ''),
-    url: n === 1 ? `/library/${claimed.rows[0].id}` : '/shelf?sort=recent',
+    title: n === 1 ? '📚 New in the library' : `📚 ${n} new resources added`,
+    body: n === 1 ? lead.title : `${lead.title} + ${n - 1} more: ${others.slice(0, 2).join(', ')}${n > 3 ? '…' : ''}`,
+    url: n === 1 ? `/library/${lead.id}` : '/shelf?sort=recent',
     tag: 'new-resources',
-    image:
-      n === 1 && process.env.PUBLIC_API_BASE_URL
-        ? `${process.env.PUBLIC_API_BASE_URL.replace(/\/$/, '')}/api/resources/${claimed.rows[0].id}/thumbnail`
-        : null,
+    image: lead.thumbnail_file_id && apiBase ? `${apiBase}/api/resources/${lead.id}/thumbnail` : null,
     ttl: RESOURCE_TTL,
   })
 }
