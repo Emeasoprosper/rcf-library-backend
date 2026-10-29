@@ -6,6 +6,9 @@ import { Router } from 'express'
 import crypto from 'node:crypto'
 import { query } from '../db/pool.js'
 import { sendPush } from '../services/pushService.js'
+import { getBotSettings } from '../services/botSettings.js'
+
+const ACTIVITY_KEEP = 500
 
 const router = Router()
 
@@ -114,6 +117,60 @@ router.post('/groups', async (req, res) => {
     }).catch((err) => console.error('New group push failed:', err.message))
   }
   res.json({ enabled, isNew })
+})
+
+// ---------- Control Center (superadmin page in the admin app) ----------
+
+// GET /bot/config — feature switches + verified RCF facts. The bot reloads
+// this every minute, so changes apply without a redeploy.
+router.get('/config', async (req, res) => {
+  const [settings, facts] = await Promise.all([
+    getBotSettings(),
+    query(`SELECT title, text FROM whatsapp_bot_facts ORDER BY created_at ASC LIMIT 100`),
+  ])
+  res.json({ settings, facts: facts.rows })
+})
+
+// GET /bot/outbox — messages a superadmin asked the bot to send.
+router.get('/outbox', async (req, res) => {
+  const result = await query(
+    `SELECT id, group_jid, text FROM whatsapp_bot_outbox
+     WHERE status = 'pending' ORDER BY created_at ASC LIMIT 10`
+  )
+  res.json({ items: result.rows })
+})
+
+// POST /bot/outbox/:id  { status: 'sent' | 'failed', error? }
+router.post('/outbox/:id', async (req, res) => {
+  const status = req.body?.status === 'sent' ? 'sent' : 'failed'
+  const error = status === 'failed' ? String(req.body?.error || 'Unknown error').slice(0, 300) : null
+  await query(
+    `UPDATE whatsapp_bot_outbox SET status = $2, error = $3, sent_at = CASE WHEN $2 = 'sent' THEN now() ELSE NULL END
+     WHERE id = $1 AND status = 'pending'`,
+    [req.params.id, status, error]
+  )
+  res.json({ ok: true })
+})
+
+// POST /bot/activity  { events: [{ kind, groupJid, summary }] } — batched
+// by the bot. Only the newest ACTIVITY_KEEP rows are kept.
+router.post('/activity', async (req, res) => {
+  const events = Array.isArray(req.body?.events) ? req.body.events.slice(0, 50) : []
+  for (const e of events) {
+    if (!e?.kind || !e?.summary) continue
+    await query(
+      `INSERT INTO whatsapp_bot_activity (kind, group_jid, summary) VALUES ($1, $2, $3)`,
+      [String(e.kind).slice(0, 30), e.groupJid ? String(e.groupJid).slice(0, 80) : null, String(e.summary).slice(0, 300)]
+    )
+  }
+  if (events.length) {
+    await query(
+      `DELETE FROM whatsapp_bot_activity WHERE id < (SELECT COALESCE(MIN(id), 0) FROM (
+         SELECT id FROM whatsapp_bot_activity ORDER BY id DESC LIMIT $1) newest)`,
+      [ACTIVITY_KEEP]
+    )
+  }
+  res.json({ ok: true })
 })
 
 export default router

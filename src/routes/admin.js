@@ -9,6 +9,7 @@ import { parseFilenameSignals } from '../utils/collectionDetector.js'
 import { getRecentErrors } from '../services/errorLog.js'
 import { sendPushToUser } from './community.js'
 import { sendPush } from '../services/pushService.js'
+import { getBotSettings, cleanBotSettings } from '../services/botSettings.js'
 
 const router = Router()
 
@@ -1225,6 +1226,105 @@ router.patch('/whatsapp/groups/:jid', requireRole('superadmin'), async (req, res
   if (result.rows.length === 0) return res.status(404).json({ error: 'Group not found' })
   await logAction(req.user.id, enabled ? 'whatsapp.group_on' : 'whatsapp.group_off', 'whatsapp_group', req.params.jid)
   res.json(result.rows[0])
+})
+
+// ---------- Bro Paul Control Center, superadmin only ----------
+
+// GET/PUT /admin/whatsapp/settings — feature switches (bot reloads every minute)
+router.get('/whatsapp/settings', requireRole('superadmin'), async (req, res) => {
+  res.json({ settings: await getBotSettings() })
+})
+
+router.put('/whatsapp/settings', requireRole('superadmin'), async (req, res) => {
+  const current = await getBotSettings()
+  const next = { ...current, ...cleanBotSettings(req.body?.settings || {}) }
+  if (next.activeToHour <= next.activeFromHour) {
+    return res.status(400).json({ error: 'The "until" hour must be after the "from" hour.' })
+  }
+  await query(
+    `UPDATE whatsapp_bot_settings SET settings = $1::jsonb, updated_by = $2, updated_at = now() WHERE id = 1`,
+    [JSON.stringify(next), req.user.id]
+  )
+  await logAction(req.user.id, 'whatsapp.settings', 'whatsapp_bot', '1', next)
+  res.json({ settings: next })
+})
+
+// Facts: verified RCF information the AI may share (service times, exco, events).
+router.get('/whatsapp/facts', requireRole('superadmin'), async (req, res) => {
+  const result = await query(`SELECT id, title, text, updated_at FROM whatsapp_bot_facts ORDER BY created_at ASC`)
+  res.json({ items: result.rows })
+})
+
+function cleanFact(body) {
+  const title = String(body?.title || '').trim().slice(0, 80)
+  const text = String(body?.text || '').trim().slice(0, 600)
+  return title && text ? { title, text } : null
+}
+
+router.post('/whatsapp/facts', requireRole('superadmin'), async (req, res) => {
+  const fact = cleanFact(req.body)
+  if (!fact) return res.status(400).json({ error: 'A title and the information are both required.' })
+  const count = await query(`SELECT COUNT(*)::int AS n FROM whatsapp_bot_facts`)
+  if (count.rows[0].n >= 100) return res.status(400).json({ error: 'You can save up to 100 facts.' })
+  const result = await query(
+    `INSERT INTO whatsapp_bot_facts (title, text, created_by) VALUES ($1, $2, $3) RETURNING id, title, text, updated_at`,
+    [fact.title, fact.text, req.user.id]
+  )
+  await logAction(req.user.id, 'whatsapp.fact_add', 'whatsapp_fact', result.rows[0].id)
+  res.status(201).json(result.rows[0])
+})
+
+router.patch('/whatsapp/facts/:id', requireRole('superadmin'), async (req, res) => {
+  const fact = cleanFact(req.body)
+  if (!fact) return res.status(400).json({ error: 'A title and the information are both required.' })
+  const result = await query(
+    `UPDATE whatsapp_bot_facts SET title = $2, text = $3, updated_at = now() WHERE id = $1 RETURNING id, title, text, updated_at`,
+    [req.params.id, fact.title, fact.text]
+  )
+  if (result.rows.length === 0) return res.status(404).json({ error: 'Fact not found' })
+  await logAction(req.user.id, 'whatsapp.fact_edit', 'whatsapp_fact', req.params.id)
+  res.json(result.rows[0])
+})
+
+router.delete('/whatsapp/facts/:id', requireRole('superadmin'), async (req, res) => {
+  const result = await query(`DELETE FROM whatsapp_bot_facts WHERE id = $1 RETURNING id`, [req.params.id])
+  if (result.rows.length === 0) return res.status(404).json({ error: 'Fact not found' })
+  await logAction(req.user.id, 'whatsapp.fact_delete', 'whatsapp_fact', req.params.id)
+  res.json({ ok: true })
+})
+
+// Send as Bro Paul: queued here, the bot picks it up within ~20 seconds.
+router.post('/whatsapp/send', requireRole('superadmin'), async (req, res) => {
+  const jid = String(req.body?.jid || '')
+  const text = String(req.body?.text || '').trim().slice(0, 3000)
+  if (!text) return res.status(400).json({ error: 'Type a message first.' })
+  const group = await query(`SELECT jid FROM whatsapp_groups WHERE jid = $1`, [jid])
+  if (group.rows.length === 0) return res.status(400).json({ error: 'Pick a group Bro Paul is in.' })
+  const result = await query(
+    `INSERT INTO whatsapp_bot_outbox (group_jid, text, created_by) VALUES ($1, $2, $3) RETURNING id, status, created_at`,
+    [jid, text, req.user.id]
+  )
+  await logAction(req.user.id, 'whatsapp.send', 'whatsapp_group', jid)
+  res.status(201).json(result.rows[0])
+})
+
+router.get('/whatsapp/outbox', requireRole('superadmin'), async (req, res) => {
+  const result = await query(
+    `SELECT o.id, o.group_jid, g.name AS group_name, o.text, o.status, o.error, o.created_at, o.sent_at
+     FROM whatsapp_bot_outbox o LEFT JOIN whatsapp_groups g ON g.jid = o.group_jid
+     ORDER BY o.created_at DESC LIMIT 20`
+  )
+  res.json({ items: result.rows })
+})
+
+// GET /admin/whatsapp/activity — newest first
+router.get('/whatsapp/activity', requireRole('superadmin'), async (req, res) => {
+  const result = await query(
+    `SELECT a.id, a.kind, a.group_jid, g.name AS group_name, a.summary, a.created_at
+     FROM whatsapp_bot_activity a LEFT JOIN whatsapp_groups g ON g.jid = a.group_jid
+     ORDER BY a.id DESC LIMIT 60`
+  )
+  res.json({ items: result.rows })
 })
 
 router.get('/system/errors', requireRole('superadmin'), (req, res) => {
