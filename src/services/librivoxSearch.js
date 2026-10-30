@@ -59,6 +59,49 @@ function toItem(b) {
   }
 }
 
+// Chapter list for one LibriVox audiobook, played straight from archive.org
+// (LibriVox's own host). Only items in the librivoxaudio collection are
+// allowed, so this can't be used to stream anything else.
+const trackCache = new Map()
+
+export async function getAudiobookTracks(identifier) {
+  if (!/^[A-Za-z0-9._-]{3,120}$/.test(String(identifier || ''))) throw Object.assign(new Error('Invalid audiobook id'), { status: 400 })
+  const hit = trackCache.get(identifier)
+  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.data
+
+  const res = await fetch(`https://archive.org/metadata/${encodeURIComponent(identifier)}`, {
+    headers: UA,
+    signal: AbortSignal.timeout(20000),
+  })
+  if (!res.ok) throw new Error(`archive.org returned ${res.status}`)
+  const meta = await res.json()
+  const m = meta.metadata || {}
+  const collections = [].concat(m.collection || [])
+  if (!collections.includes('librivoxaudio')) throw Object.assign(new Error('Not a LibriVox audiobook'), { status: 404 })
+
+  const tracks = (meta.files || [])
+    .filter((f) => /64kbps mp3/i.test(f.format || '') && /\.mp3$/i.test(f.name || ''))
+    .sort((a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true }))
+    .map((f, i) => ({
+      title: f.title && !/_/.test(f.title) ? String(f.title).slice(0, 160) : `Chapter ${i + 1}`,
+      length: f.length || null,
+      url: `https://archive.org/download/${encodeURIComponent(identifier)}/${encodeURIComponent(f.name)}`,
+    }))
+    .slice(0, 400)
+  if (tracks.length === 0) throw Object.assign(new Error('No playable chapters found'), { status: 404 })
+
+  const data = {
+    identifier,
+    title: String([].concat(m.title || '')[0] || identifier).slice(0, 250),
+    author: String([].concat(m.creator || '')[0] || '').slice(0, 250) || null,
+    coverUrl: `https://archive.org/services/img/${encodeURIComponent(identifier)}`,
+    tracks,
+  }
+  if (trackCache.size >= CACHE_MAX) trackCache.delete(trackCache.keys().next().value)
+  trackCache.set(identifier, { at: Date.now(), data })
+  return data
+}
+
 export async function searchAudiobooks(rawQuery) {
   const q = String(rawQuery || '').trim().replace(/[^\p{L}\p{N}\s'-]/gu, ' ').replace(/\s+/g, ' ').trim()
   if (q.length < 3) return []

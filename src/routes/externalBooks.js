@@ -3,7 +3,8 @@ import rateLimit from 'express-rate-limit'
 import { attachUser, requireAuth } from '../middleware/auth.js'
 import { searchArchiveBooks } from '../services/archiveSearch.js'
 import { startImport, getJob } from '../services/externalImport.js'
-import { searchAudiobooks } from '../services/librivoxSearch.js'
+import { searchAudiobooks, getAudiobookTracks } from '../services/librivoxSearch.js'
+import { searchOpenTextbooks } from '../services/openTextbooks.js'
 
 const router = Router()
 
@@ -65,6 +66,30 @@ router.get('/audiobooks/search', searchLimiter, async (req, res) => {
   } catch (err) {
     console.error('Audiobook search failed:', err.message, err.cause?.code || '')
     res.status(502).json({ error: 'The audiobook search is unavailable right now' })
+  }
+})
+
+// GET /api/external/audiobooks/:identifier/tracks — chapters to play in the app.
+router.get('/audiobooks/:identifier/tracks', searchLimiter, async (req, res) => {
+  try {
+    res.json(await getAudiobookTracks(req.params.identifier))
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message })
+    console.error('Audiobook tracks failed:', err.message, err.cause?.code || '')
+    res.status(502).json({ error: 'Could not load this audiobook right now' })
+  }
+})
+
+// GET /api/external/textbooks?q=biology — recent open textbooks, newest first.
+router.get('/textbooks', searchLimiter, async (req, res) => {
+  const q = String(req.query.q || '').trim()
+  if (q.length < 3) return res.status(400).json({ error: 'Type at least 3 characters to search' })
+  try {
+    const items = await searchOpenTextbooks(q)
+    res.json({ query: q, count: items.length, items })
+  } catch (err) {
+    console.error('Open textbook search failed:', err.message, err.cause?.code || '')
+    res.status(502).json({ error: 'The free textbook search is unavailable right now' })
   }
 })
 

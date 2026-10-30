@@ -38,6 +38,7 @@ import sitemapRoutes from './routes/sitemap.js'
 import externalBooksRoutes from './routes/externalBooks.js'
 import collectionLandingRoutes from './routes/collectionLanding.js'
 import botRoutes from './routes/bot.js'
+import engagementRoutes from './routes/engagement.js'
 import { startNewsRefreshLoop } from './services/newsService.js'
 import { recordEvent } from './services/systemEvents.js'
 
@@ -175,6 +176,7 @@ app.use('/api/reading-space', readingSpaceRoutes)
 app.use('/api/study', studyToolsRoutes)
 app.use('/api/external', externalBooksRoutes)
 app.use('/api/bot', botRoutes)
+app.use('/api/engagement', engagementRoutes)
 
 // Centralized error handler — now actually reachable for async route
 // errors thanks to express-async-errors above. Every error, from anywhere
