@@ -2,7 +2,7 @@ import { Router } from 'express'
 import rateLimit from 'express-rate-limit'
 import { attachUser, requireAuth } from '../middleware/auth.js'
 import { searchArchiveBooks } from '../services/archiveSearch.js'
-import { startImport, getJob } from '../services/externalImport.js'
+import { startImport, startTextbookImport, getJob } from '../services/externalImport.js'
 import { searchAudiobooks, getAudiobookTracks } from '../services/librivoxSearch.js'
 import { searchOpenTextbooks } from '../services/openTextbooks.js'
 
@@ -44,6 +44,16 @@ router.post('/import', attachUser, requireAuth, importLimiter, async (req, res) 
     res.status(result.jobId ? 202 : 200).json(result)
   } catch (err) {
     res.status(err.status || 400).json({ error: err.message || 'Could not add this book' })
+  }
+})
+
+// POST /api/external/textbooks/import  { id }  -> { jobId } or { alreadyInLibrary, resourceId }
+router.post('/textbooks/import', attachUser, requireAuth, importLimiter, async (req, res) => {
+  try {
+    const result = await startTextbookImport(String(req.body?.id || ''), req.user.id)
+    res.status(result.jobId ? 202 : 200).json(result)
+  } catch (err) {
+    res.status(err.status || 400).json({ error: err.message || 'Could not add this textbook' })
   }
 })
 
