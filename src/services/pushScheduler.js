@@ -1,5 +1,6 @@
 import { query } from '../db/pool.js'
 import { sendPush } from './pushService.js'
+import { verseOfTheDay } from './dailyInspiration.js'
 
 const RESOURCE_CHECK_MS = 5 * 60 * 1000
 const BIRTHDAY_CHECK_MS = 30 * 60 * 1000
@@ -89,6 +90,35 @@ async function sendBirthdayPushes() {
   }
 }
 
+// Verse of the day: every morning from 7am Lagos, one push to everyone who
+// has the "daily" preference on. Claiming the day's row first means it can
+// only ever go out once per day.
+const DAILY_FROM_HOUR = 7
+const DAILY_CHECK_MS = 15 * 60 * 1000
+const DAILY_TTL = 12 * 60 * 60
+
+async function sendDailyVerse() {
+  const { y, m, d, hour } = lagosNow()
+  if (hour < DAILY_FROM_HOUR) return
+  const day = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`
+  const claimed = await query(
+    `INSERT INTO daily_push_log (day, kind) VALUES ($1::date, 'verse') ON CONFLICT (day) DO NOTHING RETURNING day`,
+    [day]
+  )
+  if (claimed.rows.length === 0) return
+
+  const verse = verseOfTheDay()
+  const text = verse.text.length > 150 ? `${verse.text.slice(0, 147).trimEnd()}…` : verse.text
+  await sendPush({
+    category: 'daily',
+    title: `✨ Verse of the day · ${verse.ref}`,
+    body: `“${text}”`,
+    url: '/home?daily=1',
+    tag: 'daily-verse',
+    ttl: DAILY_TTL,
+  })
+}
+
 let started = false
 
 export function startPushLoops() {
@@ -100,4 +130,6 @@ export function startPushLoops() {
   setInterval(run(announceNewResources, 'New resource push'), RESOURCE_CHECK_MS).unref?.()
   setTimeout(run(sendBirthdayPushes, 'Birthday push'), 90 * 1000).unref?.()
   setInterval(run(sendBirthdayPushes, 'Birthday push'), BIRTHDAY_CHECK_MS).unref?.()
+  setTimeout(run(sendDailyVerse, 'Daily verse push'), 2 * 60 * 1000).unref?.()
+  setInterval(run(sendDailyVerse, 'Daily verse push'), DAILY_CHECK_MS).unref?.()
 }

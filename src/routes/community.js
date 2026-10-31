@@ -481,7 +481,7 @@ router.delete('/replies/:id', attachUser, requireAuth, async (req, res) => {
   res.json({ ok: true })
 })
 
-const PUSH_PREF_KEYS = ['news', 'announcements', 'resources', 'birthday', 'updates']
+const PUSH_PREF_KEYS = ['daily', 'news', 'announcements', 'resources', 'birthday', 'updates']
 
 // GET /push/preferences — missing keys count as ON.
 router.get('/push/preferences', attachUser, requireAuth, async (req, res) => {
