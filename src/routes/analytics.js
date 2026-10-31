@@ -96,7 +96,7 @@ router.get('/resources/frequently-viewed', async (req, res) => {
     const backfillResult = await query(
       `SELECT id, title, author, thumbnail_url, thumbnail_status, file_type, view_count AS recent_views
        FROM resources
-       WHERE ($1::int[] = '{}' OR id != ALL($1::int[]))
+       WHERE id != ALL($1::uuid[])
        ORDER BY created_at DESC
        LIMIT $2`,
       [excludeIds, needed]
@@ -145,7 +145,7 @@ router.get('/resources/:id/similar', async (req, res) => {
     const backfillResult = await query(
       `SELECT id, title, author, thumbnail_url
        FROM resources
-       WHERE id != ALL($1::int[])
+       WHERE id != ALL($1::uuid[])
        ORDER BY created_at DESC
        LIMIT $2`,
       [excludeIds, needed]
@@ -199,7 +199,7 @@ router.get('/recommended', requireAuth, async (req, res) => {
        SELECT r.id, r.title, r.author, r.thumbnail_url
        FROM resources r
        JOIN preferred_types pt ON pt.resource_type_id = r.resource_type_id
-       WHERE r.id != ALL($2::int[])
+       WHERE r.id != ALL($2::uuid[])
        ORDER BY pt.weight DESC, r.view_count DESC
        LIMIT $3`,
       [userId, viewedIds.length ? viewedIds : [0], limit]
@@ -216,7 +216,7 @@ router.get('/recommended', requireAuth, async (req, res) => {
     const trendingResult = await query(
       `SELECT id, title, author, thumbnail_url
        FROM resources
-       WHERE id != ALL($1::int[]) AND view_count >= $2
+       WHERE id != ALL($1::uuid[]) AND view_count >= $2
        ORDER BY view_count DESC
        LIMIT $3`,
       [excludeAfterTier1.length ? excludeAfterTier1 : [0], MIN_VIEWS_TO_COUNT_AS_POPULAR, neededAfterTier1]
@@ -234,7 +234,7 @@ router.get('/recommended', requireAuth, async (req, res) => {
     const newResult = await query(
       `SELECT id, title, author, thumbnail_url
        FROM resources
-       WHERE id != ALL($1::int[])
+       WHERE id != ALL($1::uuid[])
        ORDER BY created_at DESC
        LIMIT $2`,
       [excludeAfterTier2.length ? excludeAfterTier2 : [0], neededAfterTier2]

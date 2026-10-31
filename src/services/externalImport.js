@@ -6,6 +6,7 @@ import { uploadToStorage, deleteFromStorage } from './storage.js'
 import { resolveUploadCategory } from '../config/driveFolders.js'
 import { queuePreviewGeneration } from './previewQueue.js'
 import { getImportableItem } from './archiveSearch.js'
+import { getImportableTextbook } from './openTextbooks.js'
 
 const UA = { 'User-Agent': 'RCF-MOUAU-Library/1.0 (+https://rcf-mouau-library.vercel.app)' }
 const MAX_BYTES = 60 * 1024 * 1024
@@ -43,7 +44,7 @@ function downloadOnce(url, redirectsLeft = 5) {
       if (status !== 200) {
         clearTimeout(deadline)
         res.resume()
-        return reject(new Error(`archive.org returned ${status} for the file`))
+        return reject(new Error(`The source returned ${status} for the file`))
       }
       if (Number(res.headers['content-length'] || 0) > MAX_BYTES) {
         clearTimeout(deadline)
@@ -97,8 +98,7 @@ async function runImport(item, userId, job) {
   let inserted = false
   let step = 'download'
   try {
-    const encodedPath = item.pdfName.split('/').map(encodeURIComponent).join('/')
-    const buffer = await downloadCapped(`https://archive.org/download/${encodeURIComponent(item.identifier)}/${encodedPath}`)
+    const buffer = await downloadCapped(item.downloadUrl)
     if (buffer.subarray(0, 5).toString('latin1') !== '%PDF-') throw new Error('Downloaded file is not a valid PDF')
 
     step = 'drive upload'
@@ -111,7 +111,7 @@ async function runImport(item, userId, job) {
     if (typeResult.rows.length === 0) throw new Error('Book resource type is missing')
 
     const description =
-      `Source: Internet Archive (${item.sourceUrl}) · Licence: ${item.licence}` +
+      `Source: ${item.sourceName} (${item.sourceUrl}) · Licence: ${item.licence}` +
       `${item.year ? ` · Published ${item.year}` : ''}. Added on request through the RCF library.`
 
     const result = await query(
@@ -121,12 +121,12 @@ async function runImport(item, userId, job) {
          uploaded_by, is_anonymous, thumbnail_status, status, reviewed_at,
          external_source, external_id, external_url, external_licence
        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'application/pdf',$9,$10,true,'pending','approved',now(),
-                 'internet_archive',$11,$12,$13)
+                 $11,$12,$13,$14)
        RETURNING id`,
       [
         item.title, item.author, description, typeResult.rows[0].id,
         stored.provider, stored.fileId, stored.fileUrl, file.originalname, buffer.length,
-        userId, item.identifier, item.sourceUrl, item.licence,
+        userId, item.externalSource, item.identifier, item.sourceUrl, item.licence,
       ]
     )
     inserted = true
@@ -151,14 +151,33 @@ async function runImport(item, userId, job) {
   }
 }
 
+// Internet Archive book (public domain / open licence, re-checked here).
 export async function startImport(identifier, userId) {
+  const found = await getImportableItem(identifier)
+  const encodedPath = found.pdfName.split('/').map(encodeURIComponent).join('/')
+  return queueImport(
+    {
+      ...found,
+      externalSource: 'internet_archive',
+      sourceName: 'Internet Archive',
+      downloadUrl: `https://archive.org/download/${encodeURIComponent(identifier)}/${encodedPath}`,
+    },
+    userId
+  )
+}
+
+// Open Textbook Library textbook (publisher's own open licence, re-checked here).
+export async function startTextbookImport(textbookId, userId) {
+  const found = await getImportableTextbook(textbookId)
+  return queueImport({ ...found, externalSource: 'open_textbook_library', sourceName: 'Open Textbook Library' }, userId)
+}
+
+async function queueImport(item, userId) {
   for (const [id, job] of jobs) if (Date.now() - job.at > 60 * 60 * 1000) jobs.delete(id)
 
-  const item = await getImportableItem(identifier)
-
   const existing = await query(
-    `SELECT id, status FROM resources WHERE external_source = 'internet_archive' AND external_id = $1`,
-    [identifier]
+    `SELECT id, status FROM resources WHERE external_source = $1 AND external_id = $2`,
+    [item.externalSource, item.identifier]
   )
   if (existing.rows.length > 0) {
     if (existing.rows[0].status === 'approved') return { alreadyInLibrary: true, resourceId: existing.rows[0].id }
