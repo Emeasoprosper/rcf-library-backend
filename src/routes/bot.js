@@ -7,6 +7,7 @@ import crypto from 'node:crypto'
 import { query } from '../db/pool.js'
 import { sendPush } from '../services/pushService.js'
 import { getBotSettings } from '../services/botSettings.js'
+import { verseOfTheDay, tipOfTheDay } from '../services/dailyInspiration.js'
 
 const ACTIVITY_KEEP = 500
 
@@ -123,6 +124,12 @@ router.post('/groups', async (req, res) => {
 
 // GET /bot/config — feature switches + verified RCF facts. The bot reloads
 // this every minute, so changes apply without a redeploy.
+// GET /bot/daily — today's verse and study tip, the same ones the app and the
+// 7am phone push show, for the bot's morning post in the groups.
+router.get('/daily', (req, res) => {
+  res.json({ verse: verseOfTheDay(), tip: tipOfTheDay() })
+})
+
 router.get('/config', async (req, res) => {
   const [settings, facts] = await Promise.all([
     getBotSettings(),

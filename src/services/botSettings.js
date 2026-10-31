@@ -12,13 +12,14 @@ export const BOT_SETTING_DEFAULTS = {
   reactions: true,
   answerUntagged: true,
   privateChats: true,
+  morningPost: true,
   promoEveryHours: 48,
   activeFromHour: 7,
   activeToHour: 21,
   dailyAiLimit: 150,
 }
 
-const BOOL_KEYS = ['chimeIn', 'welcomeNewMembers', 'birthdayWishes', 'newMonthWishes', 'reactions', 'answerUntagged', 'privateChats']
+const BOOL_KEYS = ['chimeIn', 'welcomeNewMembers', 'birthdayWishes', 'newMonthWishes', 'reactions', 'answerUntagged', 'privateChats', 'morningPost']
 const INT_RANGES = {
   promoEveryHours: [0, 24 * 14],
   activeFromHour: [0, 23],
