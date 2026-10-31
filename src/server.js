@@ -75,7 +75,15 @@ const allowedOrigins = (process.env.FRONTEND_URLS || '').split(',').map((s) => s
 // this team's deployments can have that suffix, so it's safe to allow.
 // Without this, anyone opening one of those links got "Not allowed by CORS".
 const OWN_VERCEL_ORIGIN = /^https:\/\/rcfmouaulib(-[a-z0-9]+)?-emeasoprospers-projects\.vercel\.app$/
-const isAllowedOrigin = (origin) => allowedOrigins.includes(origin) || OWN_VERCEL_ORIGIN.test(origin)
+// Local development only (NODE_ENV=development in .env): the Vite dev server
+// listens on 0.0.0.0, so the site is also opened from a phone on the same
+// Wi-Fi (http://192.168.x.x:5173), on another port when 5173 is busy, or via
+// `vite preview` (4173). Allow this computer and private LAN addresses on any
+// port. Never active on Render.
+const LOCAL_DEV_ORIGIN = /^http:\/\/(localhost|127\.0\.0\.1|10(\.\d{1,3}){3}|192\.168(\.\d{1,3}){2}|172\.(1[6-9]|2\d|3[01])(\.\d{1,3}){2}):\d{2,5}$/
+const isLocalDev = process.env.NODE_ENV === 'development'
+const isAllowedOrigin = (origin) =>
+  allowedOrigins.includes(origin) || OWN_VERCEL_ORIGIN.test(origin) || (isLocalDev && LOCAL_DEV_ORIGIN.test(origin))
 const frameAncestors = ["'self'", ...allowedOrigins, 'https://rcfmouaulib-emeasoprospers-projects.vercel.app']
 
 app.use(
