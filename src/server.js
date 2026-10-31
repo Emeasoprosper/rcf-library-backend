@@ -70,7 +70,13 @@ app.set('trust proxy', 1)
 // Add your production frontend domain(s) to FRONTEND_URLS in .env
 // (comma-separated) before deploying — nothing else needs to change.
 const allowedOrigins = (process.env.FRONTEND_URLS || '').split(',').map((s) => s.trim()).filter(Boolean)
-const frameAncestors = ["'self'", ...allowedOrigins]
+// Vercel also serves the site at the project alias and at one unique URL per
+// deployment (rcfmouaulib-<hash>-emeasoprospers-projects.vercel.app). Only
+// this team's deployments can have that suffix, so it's safe to allow.
+// Without this, anyone opening one of those links got "Not allowed by CORS".
+const OWN_VERCEL_ORIGIN = /^https:\/\/rcfmouaulib(-[a-z0-9]+)?-emeasoprospers-projects\.vercel\.app$/
+const isAllowedOrigin = (origin) => allowedOrigins.includes(origin) || OWN_VERCEL_ORIGIN.test(origin)
+const frameAncestors = ["'self'", ...allowedOrigins, 'https://rcfmouaulib-emeasoprospers-projects.vercel.app']
 
 app.use(
   helmet({
@@ -122,8 +128,9 @@ app.use((req, res, next) => {
 
   cors({
     origin: (origin, callback) => {
-      if (!origin || allowedOrigins.includes(origin)) return callback(null, true)
-      callback(new Error('Not allowed by CORS'))
+      if (!origin || isAllowedOrigin(origin)) return callback(null, true)
+      // The origin is in the message so the admin Checkup page shows WHO was blocked.
+      callback(new Error(`Not allowed by CORS (origin: ${String(origin).slice(0, 100)})`))
     },
     credentials: true,
   })(req, res, next)
