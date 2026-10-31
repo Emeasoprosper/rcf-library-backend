@@ -1,7 +1,7 @@
 // routes/analytics.js
 import { Router } from 'express'
 import { query } from '../db/pool.js'
-import { requireAuth } from '../middleware/auth.js' // adjust import if your auth middleware exports differently
+import { attachUser, requireAuth } from '../middleware/auth.js'
 
 const router = Router()
 
@@ -172,7 +172,9 @@ router.get('/resources/:id/similar', async (req, res) => {
 //      genuinely popular right now, still excluding already-viewed items.
 //   3. Recently added backfill: final fallback if the library itself
 //      doesn't have enough trending volume yet.
-router.get('/recommended', requireAuth, async (req, res) => {
+// attachUser reads the login cookie first; without it req.user is never set
+// and this returned 401 to everyone, signed in or not.
+router.get('/recommended', attachUser, requireAuth, async (req, res) => {
   const limit = Math.min(Number(req.query.limit) || 10, 30)
   const userId = req.user.id
 

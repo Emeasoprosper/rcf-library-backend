@@ -241,14 +241,53 @@ router.post('/google/redirect-callback', async (req, res) => {
     }
 
     await issueSession(res, user, req)
+    // The cookies above belong to this API's own domain, which the site
+    // (on another domain) can only use as third-party cookies, and Safari
+    // and many Chrome setups block those. So the site also gets a one-time,
+    // two-minute handoff code and trades it at POST /auth/handoff through
+    // its own /backend proxy, which gives it first-party session cookies.
     // Redirects to the app root, not directly to /home, so RootRedirect
     // in AppRoutes.jsx gets a chance to check sessionStorage for a
     // pending returnTo (set by SignIn.jsx) before deciding where to land.
-    res.redirect(frontendUrl)
+    res.redirect(`${frontendUrl}/?handoff=${encodeURIComponent(signHandoffToken(user))}`)
   } catch (err) {
     console.error('Google redirect sign-in failed:', err.message)
     res.redirect(`${frontendUrl}/signin?error=signin_failed`)
   }
+})
+
+// One-time Google sign-in handoff (see redirect-callback above). Each code
+// works once and only for two minutes.
+const HANDOFF_TTL = '2m'
+const usedHandoffs = new Map() // jti -> expiry ms
+
+function signHandoffToken(user) {
+  return jwt.sign({ uid: user.id, scope: 'handoff', jti: crypto.randomBytes(12).toString('hex') }, process.env.JWT_SECRET, {
+    expiresIn: HANDOFF_TTL,
+  })
+}
+
+// POST /auth/handoff { token } -> session cookies for the caller's own domain.
+router.post('/handoff', async (req, res) => {
+  let payload
+  try {
+    payload = jwt.verify(String(req.body?.token || ''), process.env.JWT_SECRET)
+  } catch {
+    return res.status(401).json({ error: 'This sign-in link has expired. Please sign in again.' })
+  }
+  const now = Date.now()
+  for (const [jti, exp] of usedHandoffs) if (exp < now) usedHandoffs.delete(jti)
+  if (payload.scope !== 'handoff' || !payload.jti || usedHandoffs.has(payload.jti)) {
+    return res.status(401).json({ error: 'This sign-in link was already used. Please sign in again.' })
+  }
+  usedHandoffs.set(payload.jti, payload.exp * 1000)
+
+  const result = await query('SELECT * FROM users WHERE id = $1', [payload.uid])
+  const user = result.rows[0]
+  if (!user || user.is_suspended) return res.status(401).json({ error: 'Please sign in again.' })
+
+  await issueSession(res, user, req)
+  res.json({ user: publicUser(user) })
 })
 
 router.post('/refresh', async (req, res) => {

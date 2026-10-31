@@ -56,7 +56,11 @@ process.on('uncaughtException', (err) => {
 
 const app = express()
 
-app.set('trust proxy', 1)
+// Two proxies sit in front of us: the site's own /backend rewrite on Vercel
+// (so session cookies are first-party), then Render's load balancer. Trusting
+// both makes req.ip the student's real address, so the rate limits below are
+// per student instead of one shared bucket for everyone coming via Vercel.
+app.set('trust proxy', 2)
 
 // Same list CORS uses below — the admin PDF/video/image preview modal
 // embeds this API's /admin/uploads/:id/preview-stream response in an
@@ -118,6 +122,14 @@ app.use(cookieParser())
 app.use(express.json({ limit: '2mb' }))
 app.use(express.urlencoded({ extended: true }))
 
+// The site reaches this API through Vercel's /backend rewrite, and Vercel can
+// cache rewritten responses. Signed-in answers must never be cached and
+// served to someone else, so opt every API response out.
+app.use('/api', (req, res, next) => {
+  res.set('x-vercel-enable-rewrite-caching', '0')
+  next()
+})
+
 app.use((req, res, next) => {
   // Google's redirect-mode OAuth POSTs here as a real top-level form
   // submission from accounts.google.com, not a JS fetch — browsers never
@@ -160,6 +172,7 @@ const strictLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 30 })
 app.use('/api/auth/google', strictLimiter)
 app.use('/api/auth/login', strictLimiter)
 app.use('/api/auth/signup', strictLimiter)
+app.use('/api/auth/handoff', strictLimiter)
 app.use('/api/uploads', strictLimiter)
 
 // Loose limiter on the public unfurl page — enough headroom for real
