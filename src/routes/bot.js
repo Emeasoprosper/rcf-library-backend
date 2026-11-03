@@ -7,6 +7,7 @@ import crypto from 'node:crypto'
 import { query } from '../db/pool.js'
 import { sendPush } from '../services/pushService.js'
 import { getBotSettings } from '../services/botSettings.js'
+import { ensureGroupSettingsColumn, withGroupDefaults } from '../services/groupSettings.js'
 import { verseOfTheDay, tipOfTheDay } from '../services/dailyInspiration.js'
 
 const ACTIVITY_KEEP = 500
@@ -79,10 +80,15 @@ router.post('/status', async (req, res) => {
   res.json({ relink: !!result.rows[0]?.relink_requested })
 })
 
-// GET /bot/groups — groups the bot should talk in.
+// GET /bot/groups — groups the bot should talk in, and each one's rules
+// (who the group is for, which posts are allowed there).
 router.get('/groups', async (req, res) => {
-  const result = await query(`SELECT jid FROM whatsapp_groups WHERE enabled = TRUE`)
-  res.json({ jids: result.rows.map((r) => r.jid) })
+  await ensureGroupSettingsColumn()
+  const result = await query(`SELECT jid, settings FROM whatsapp_groups WHERE enabled = TRUE`)
+  res.json({
+    jids: result.rows.map((r) => r.jid),
+    settings: Object.fromEntries(result.rows.map((r) => [r.jid, withGroupDefaults(r.settings)])),
+  })
 })
 
 // POST /bot/groups  { jid, name, memberCount } — the bot reports a group it

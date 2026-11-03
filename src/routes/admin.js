@@ -10,6 +10,7 @@ import { getRecentErrors } from '../services/errorLog.js'
 import { sendPushToUser } from './community.js'
 import { sendPush } from '../services/pushService.js'
 import { getBotSettings, cleanBotSettings } from '../services/botSettings.js'
+import { ensureGroupSettingsColumn, cleanGroupSettings, withGroupDefaults } from '../services/groupSettings.js'
 
 const router = Router()
 
@@ -1188,6 +1189,7 @@ const BOT_STALE_SECONDS = 120
 
 // GET /admin/whatsapp — bot status, QR to scan (while linking), and groups.
 router.get('/whatsapp', requireRole('superadmin'), async (req, res) => {
+  await ensureGroupSettingsColumn()
   const [status, groups] = await Promise.all([
     query(
       `SELECT state, qr_data_url, phone, relink_requested, updated_at,
@@ -1195,7 +1197,7 @@ router.get('/whatsapp', requireRole('superadmin'), async (req, res) => {
        FROM whatsapp_bot_status WHERE id = 1`,
       [BOT_STALE_SECONDS]
     ),
-    query(`SELECT jid, name, enabled, member_count, added_at, last_seen_at FROM whatsapp_groups ORDER BY added_at DESC`),
+    query(`SELECT jid, name, enabled, member_count, added_at, last_seen_at, settings FROM whatsapp_groups ORDER BY added_at DESC`),
   ])
   const row = status.rows[0] || { state: 'offline' }
   const state = row.stale ? 'offline' : row.state
@@ -1205,7 +1207,7 @@ router.get('/whatsapp', requireRole('superadmin'), async (req, res) => {
     phone: row.phone || null,
     relinkRequested: !!row.relink_requested,
     updatedAt: row.updated_at || null,
-    groups: groups.rows,
+    groups: groups.rows.map((g) => ({ ...g, settings: withGroupDefaults(g.settings) })),
   })
 })
 
@@ -1216,16 +1218,26 @@ router.post('/whatsapp/relink', requireRole('superadmin'), async (req, res) => {
   res.json({ ok: true })
 })
 
-// PATCH /admin/whatsapp/groups/:jid  { enabled }
+// PATCH /admin/whatsapp/groups/:jid  { enabled?, settings? }
+// settings = who the group is for and which posts are allowed there (see
+// services/groupSettings.js); only the keys sent are changed.
 router.patch('/whatsapp/groups/:jid', requireRole('superadmin'), async (req, res) => {
-  const enabled = !!req.body.enabled
+  await ensureGroupSettingsColumn()
+  const hasEnabled = typeof req.body.enabled === 'boolean'
+  const settings = req.body.settings ? cleanGroupSettings(req.body.settings) : {}
   const result = await query(
-    `UPDATE whatsapp_groups SET enabled = $2 WHERE jid = $1 RETURNING jid, enabled`,
-    [req.params.jid, enabled]
+    `UPDATE whatsapp_groups
+       SET enabled = CASE WHEN $2::boolean IS NULL THEN enabled ELSE $2::boolean END,
+           settings = settings || $3::jsonb
+     WHERE jid = $1
+     RETURNING jid, enabled, settings`,
+    [req.params.jid, hasEnabled ? req.body.enabled : null, JSON.stringify(settings)]
   )
   if (result.rows.length === 0) return res.status(404).json({ error: 'Group not found' })
-  await logAction(req.user.id, enabled ? 'whatsapp.group_on' : 'whatsapp.group_off', 'whatsapp_group', req.params.jid)
-  res.json(result.rows[0])
+  if (hasEnabled) await logAction(req.user.id, req.body.enabled ? 'whatsapp.group_on' : 'whatsapp.group_off', 'whatsapp_group', req.params.jid)
+  if (Object.keys(settings).length) await logAction(req.user.id, 'whatsapp.group_settings', 'whatsapp_group', req.params.jid)
+  const row = result.rows[0]
+  res.json({ ...row, settings: withGroupDefaults(row.settings) })
 })
 
 // ---------- Bro Paul Control Center, superadmin only ----------
