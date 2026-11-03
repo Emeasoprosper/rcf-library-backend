@@ -6,11 +6,14 @@
 //                          asked, introduced as "for MOUAU students"
 //              'general' : not a student group; never mentions past
 //                          questions or lecture notes
+//   prayer   - during a prayer session: 'quiet', 'amen' (🙏 the prayers)
+//              or 'join' (also adds a short prayer now and then)
 //   the rest - which kinds of posts the bot may send there
 import { query } from '../db/pool.js'
 
 export const GROUP_SETTING_DEFAULTS = {
   audience: 'campus',
+  prayer: 'amen',
   bookOfDay: true,
   morningPost: true,
   promos: true,
@@ -21,12 +24,14 @@ export const GROUP_SETTING_DEFAULTS = {
 }
 
 const AUDIENCES = ['campus', 'mixed', 'general']
+const PRAYER_MODES = ['quiet', 'amen', 'join']
 const BOOL_KEYS = ['bookOfDay', 'morningPost', 'promos', 'welcome', 'chimeIn', 'newMonth', 'birthdays']
 
 // Keeps only known keys with sane values.
 export function cleanGroupSettings(input = {}) {
   const out = {}
   if (AUDIENCES.includes(input.audience)) out.audience = input.audience
+  if (PRAYER_MODES.includes(input.prayer)) out.prayer = input.prayer
   for (const key of BOOL_KEYS) if (typeof input[key] === 'boolean') out[key] = input[key]
   return out
 }
