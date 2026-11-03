@@ -31,7 +31,9 @@ export const GROUP_SETTING_DEFAULTS = {
 
 const AUDIENCES = ['campus', 'mixed', 'general']
 const PRAYER_MODES = ['quiet', 'amen', 'join']
-const BOOL_KEYS = ['bookOfDay', 'morningPost', 'promos', 'welcome', 'chimeIn', 'newMonth', 'birthdays', 'revealAi', 'started']
+// studyTip has no default on purpose: until it's set, the bot shows the
+// study tip in student groups and leaves it out of 'general' ones.
+const BOOL_KEYS = ['bookOfDay', 'morningPost', 'studyTip', 'promos', 'welcome', 'chimeIn', 'newMonth', 'birthdays', 'revealAi', 'started']
 
 // Keeps only known keys with sane values.
 export function cleanGroupSettings(input = {}) {
