@@ -127,7 +127,7 @@ router.get('/', attachUser, async (req, res) => {
     `SELECT r.id, r.title, r.author, r.description, r.course_code, r.level, r.semester,
             r.thumbnail_url, r.thumbnail_status, r.file_type, r.file_size_bytes,
             r.page_count, r.duration_seconds, r.download_count, r.view_count, r.created_at,
-            r.media_subtype,
+            r.media_subtype, r.external_licence,
             rt.slug AS type, rt.label AS type_label, rt.icon AS type_icon,
             c.name AS category, d.name AS department,
             COALESCE(cats.names, ARRAY[]::text[]) AS categories,

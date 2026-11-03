@@ -23,9 +23,14 @@ export const BOT_SETTING_DEFAULTS = {
   saveChats: true,
   chatLogLimitMb: 100,
   chatLogAutoDelete: true,
+  // Answer voice notes with a spoken voice note (male voice).
+  voiceReplies: true,
+  // Book of the day only picks books with an open licence (public domain,
+  // Creative Commons), i.e. ones added through the app's free-book search.
+  featuredOnlyLicensed: false,
 }
 
-const BOOL_KEYS = ['chimeIn', 'welcomeNewMembers', 'birthdayWishes', 'newMonthWishes', 'reactions', 'answerUntagged', 'privateChats', 'morningPost', 'stickers', 'saveChats', 'chatLogAutoDelete']
+const BOOL_KEYS = ['chimeIn', 'welcomeNewMembers', 'birthdayWishes', 'newMonthWishes', 'reactions', 'answerUntagged', 'privateChats', 'morningPost', 'stickers', 'saveChats', 'chatLogAutoDelete', 'voiceReplies', 'featuredOnlyLicensed']
 const INT_RANGES = {
   promoEveryHours: [0, 24 * 14],
   activeFromHour: [0, 23],
