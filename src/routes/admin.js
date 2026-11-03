@@ -1352,6 +1352,16 @@ router.get('/whatsapp/activity', requireRole('superadmin'), async (req, res) => 
   res.json({ items: result.rows })
 })
 
+// DELETE /admin/whatsapp/groups/:jid — take a group he was removed from off
+// the list. Its saved chats stay in the Chats tab until deleted there.
+router.delete('/whatsapp/groups/:jid', requireRole('superadmin'), async (req, res) => {
+  await ensureGroupSettingsColumn()
+  const result = await query(`DELETE FROM whatsapp_groups WHERE jid = $1 AND settings->>'left' = 'true' RETURNING jid`, [req.params.jid])
+  if (result.rows.length === 0) return res.status(400).json({ error: 'Only groups Bro Paul has been removed from can be taken off the list.' })
+  await logAction(req.user.id, 'whatsapp.group_forget', 'whatsapp_group', req.params.jid)
+  res.json({ ok: true })
+})
+
 // POST /admin/whatsapp/groups/:jid/start  { introduce }
 // A new group: Bro Paul starts talking there, introducing himself first if
 // asked. An active group: introduce = he introduces himself again now.

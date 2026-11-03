@@ -103,30 +103,87 @@ router.post('/groups', async (req, res) => {
   const count = Number.isInteger(memberCount) ? memberCount : null
   await ensureGroupSettingsColumn()
 
+  // A group he was removed from and is now added back to: it waits under
+  // "New groups" again (silent until a superadmin starts him there).
+  const before = await query(`SELECT settings->>'left' = 'true' AS was_left FROM whatsapp_groups WHERE jid = $1`, [jid])
+  const rejoined = !!before.rows[0]?.was_left
+
   const result = await query(
     `INSERT INTO whatsapp_groups (jid, name, member_count, enabled, settings)
      VALUES ($1, $2, $3, FALSE, '{"started": false}'::jsonb)
      ON CONFLICT (jid) DO UPDATE
        SET name = COALESCE(EXCLUDED.name, whatsapp_groups.name),
            member_count = COALESCE(EXCLUDED.member_count, whatsapp_groups.member_count),
-           last_seen_at = now()
+           last_seen_at = now(),
+           settings = CASE WHEN $4 THEN (whatsapp_groups.settings - 'left') || '{"started": false}'::jsonb ELSE whatsapp_groups.settings END,
+           enabled = CASE WHEN $4 THEN FALSE ELSE whatsapp_groups.enabled END
      RETURNING enabled, (xmax = 0) AS is_new`,
-    [jid, cleanName, count]
+    [jid, cleanName, count, rejoined]
   )
   const { enabled, is_new: isNew } = result.rows[0]
 
-  if (isNew) {
-    const admins = await query(`SELECT id FROM users WHERE role = 'superadmin' AND is_suspended = false`)
+  if (isNew || rejoined) {
     sendPush({
       category: 'updates',
-      userIds: admins.rows.map((r) => r.id),
-      title: 'Bro Paul joined a new WhatsApp group',
-      body: `${cleanName || 'A new group'}${count ? ` (${count} members)` : ''}. He's waiting quietly: tap to introduce him or start him there.`,
+      userIds: await superadminIds(),
+      title: rejoined ? 'Bro Paul was added back to a WhatsApp group' : 'Bro Paul joined a new WhatsApp group',
+      body: `${cleanName || 'A group'}${count ? ` (${count} members)` : ''}. He's waiting quietly: tap to introduce him or start him there.`,
       url: '/admin/whatsapp',
       tag: `wa-group-${jid}`,
     }).catch((err) => console.error('New group push failed:', err.message))
   }
-  res.json({ enabled, isNew })
+  res.json({ enabled, isNew, rejoined })
+})
+
+async function superadminIds() {
+  const admins = await query(`SELECT id FROM users WHERE role = 'superadmin' AND is_suspended = false`)
+  return admins.rows.map((r) => r.id)
+}
+
+// Marks a group he's no longer in: switched off, shown under "Removed from"
+// in the admin app, and treated as new again if he's ever added back.
+const LEFT_SQL = `UPDATE whatsapp_groups
+  SET enabled = FALSE, settings = settings || '{"left": true, "started": false}'::jsonb
+  WHERE jid = ANY($1) AND COALESCE(settings->>'left', 'false') <> 'true'
+  RETURNING jid, name`
+
+async function notifyLeft(rows) {
+  if (rows.length === 0) return
+  const names = rows.map((r) => r.name || 'a group').join(', ')
+  sendPush({
+    category: 'updates',
+    userIds: await superadminIds(),
+    title: rows.length === 1 ? 'Bro Paul was removed from a WhatsApp group' : `Bro Paul was removed from ${rows.length} WhatsApp groups`,
+    body: `${names}. He's switched off there; add his number back to use him again.`,
+    url: '/admin/whatsapp',
+    tag: 'wa-group-left',
+  }).catch((err) => console.error('Group left push failed:', err.message))
+}
+
+// POST /bot/groups/left  { jid } — he was just removed from (or left) a group.
+router.post('/groups/left', async (req, res) => {
+  const jid = String(req.body?.jid || '')
+  if (!jid.endsWith('@g.us')) return res.status(400).json({ error: 'Invalid group id' })
+  await ensureGroupSettingsColumn()
+  const result = await query(LEFT_SQL, [[jid]])
+  notifyLeft(result.rows)
+  res.json({ ok: true, marked: result.rowCount })
+})
+
+// POST /bot/groups/sync  { jids } — every group he's in right now, sent after
+// he reconnects, so groups he was removed from while offline are marked too.
+router.post('/groups/sync', async (req, res) => {
+  const jids = Array.isArray(req.body?.jids) ? req.body.jids.filter((j) => typeof j === 'string' && j.endsWith('@g.us')) : []
+  // An empty list is more likely a glitch than "removed from every group".
+  if (jids.length === 0) return res.json({ ok: true, marked: 0 })
+  await ensureGroupSettingsColumn()
+  const gone = await query(
+    `SELECT jid FROM whatsapp_groups WHERE NOT (jid = ANY($1)) AND COALESCE(settings->>'left', 'false') <> 'true'`,
+    [jids]
+  )
+  const result = gone.rows.length ? await query(LEFT_SQL, [gone.rows.map((r) => r.jid)]) : { rows: [], rowCount: 0 }
+  notifyLeft(result.rows)
+  res.json({ ok: true, marked: result.rowCount })
 })
 
 // ---------- Control Center (superadmin page in the admin app) ----------
