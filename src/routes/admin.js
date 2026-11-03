@@ -1333,7 +1333,7 @@ router.get('/whatsapp/outbox', requireRole('superadmin'), async (req, res) => {
 // Activity categories in the admin app, by the kinds the bot logs.
 const ACTIVITY_CATEGORIES = {
   private: ['private'],
-  posts: ['morning', 'featured', 'promo', 'new-month', 'welcome', 'intro'],
+  posts: ['morning', 'featured', 'promo', 'new-month', 'welcome', 'intro', 'cleanup'],
   announcements: ['announcement', 'send'],
   replies: ['reply', 'search', 'chime', 'prayer'],
   reactions: ['react', 'sticker', 'birthday'],
