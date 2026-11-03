@@ -18,14 +18,20 @@ export const BOT_SETTING_DEFAULTS = {
   activeFromHour: 7,
   activeToHour: 21,
   dailyAiLimit: 150,
+  // Chat log (admin app > Chats): save conversations, how much space they
+  // may use, and whether the oldest are deleted automatically when full.
+  saveChats: true,
+  chatLogLimitMb: 100,
+  chatLogAutoDelete: true,
 }
 
-const BOOL_KEYS = ['chimeIn', 'welcomeNewMembers', 'birthdayWishes', 'newMonthWishes', 'reactions', 'answerUntagged', 'privateChats', 'morningPost', 'stickers']
+const BOOL_KEYS = ['chimeIn', 'welcomeNewMembers', 'birthdayWishes', 'newMonthWishes', 'reactions', 'answerUntagged', 'privateChats', 'morningPost', 'stickers', 'saveChats', 'chatLogAutoDelete']
 const INT_RANGES = {
   promoEveryHours: [0, 24 * 14],
   activeFromHour: [0, 23],
   activeToHour: [1, 24],
   dailyAiLimit: [0, 2000],
+  chatLogLimitMb: [10, 2000],
 }
 
 // Keeps only known keys with sane values.

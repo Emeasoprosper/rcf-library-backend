@@ -11,6 +11,7 @@ import { sendPushToUser } from './community.js'
 import { sendPush } from '../services/pushService.js'
 import { getBotSettings, cleanBotSettings } from '../services/botSettings.js'
 import { ensureGroupSettingsColumn, cleanGroupSettings, withGroupDefaults } from '../services/groupSettings.js'
+import { ensureChatLogTables, chatLogUsage } from '../services/botChatLog.js'
 
 const router = Router()
 
@@ -1329,13 +1330,110 @@ router.get('/whatsapp/outbox', requireRole('superadmin'), async (req, res) => {
   res.json({ items: result.rows })
 })
 
-// GET /admin/whatsapp/activity — newest first
+// Activity categories in the admin app, by the kinds the bot logs.
+const ACTIVITY_CATEGORIES = {
+  private: ['private'],
+  posts: ['morning', 'featured', 'promo', 'new-month', 'welcome', 'intro'],
+  announcements: ['announcement', 'send'],
+  replies: ['reply', 'search', 'chime', 'prayer'],
+  reactions: ['react', 'sticker', 'birthday'],
+}
+
+// GET /admin/whatsapp/activity?category=posts — newest first
 router.get('/whatsapp/activity', requireRole('superadmin'), async (req, res) => {
+  const kinds = ACTIVITY_CATEGORIES[req.query.category] || null
   const result = await query(
     `SELECT a.id, a.kind, a.group_jid, g.name AS group_name, a.summary, a.created_at
      FROM whatsapp_bot_activity a LEFT JOIN whatsapp_groups g ON g.jid = a.group_jid
-     ORDER BY a.id DESC LIMIT 60`
+     WHERE ($1::text[] IS NULL OR a.kind = ANY($1))
+     ORDER BY a.id DESC LIMIT 100`,
+    [kinds]
   )
+  res.json({ items: result.rows })
+})
+
+// POST /admin/whatsapp/groups/:jid/start  { introduce }
+// A new group: Bro Paul starts talking there, introducing himself first if
+// asked. An active group: introduce = he introduces himself again now.
+router.post('/whatsapp/groups/:jid/start', requireRole('superadmin'), async (req, res) => {
+  await Promise.all([ensureGroupSettingsColumn(), ensureChatLogTables()])
+  const jid = req.params.jid
+  const result = await query(
+    `UPDATE whatsapp_groups SET enabled = TRUE, settings = settings || '{"started": true}'::jsonb
+     WHERE jid = $1 RETURNING jid, enabled, settings`,
+    [jid]
+  )
+  if (result.rows.length === 0) return res.status(404).json({ error: 'Group not found' })
+  if (req.body?.introduce) {
+    await query(`INSERT INTO whatsapp_bot_outbox (group_jid, text, kind, created_by) VALUES ($1, '(introduction)', 'intro', $2)`, [jid, req.user.id])
+  }
+  await logAction(req.user.id, req.body?.introduce ? 'whatsapp.group_introduce' : 'whatsapp.group_start', 'whatsapp_group', jid)
+  const row = result.rows[0]
+  res.json({ ...row, settings: withGroupDefaults(row.settings) })
+})
+
+// ---------- Saved chats (Chats tab) ----------
+
+// GET /admin/whatsapp/chats?type=group|private — one row per conversation.
+router.get('/whatsapp/chats', requireRole('superadmin'), async (req, res) => {
+  await ensureChatLogTables()
+  const type = ['group', 'private'].includes(req.query.type) ? req.query.type : null
+  const result = await query(
+    `SELECT m.chat_jid, m.chat_type, COALESCE(g.name, last.chat_name, last.sender_name) AS name,
+            m.count, last.text AS last_text, last.from_bot AS last_from_bot, last.created_at AS last_at
+     FROM (SELECT chat_jid, chat_type, COUNT(*)::int AS count, MAX(id) AS last_id
+           FROM whatsapp_messages WHERE ($1::text IS NULL OR chat_type = $1)
+           GROUP BY chat_jid, chat_type) m
+     JOIN whatsapp_messages last ON last.id = m.last_id
+     LEFT JOIN whatsapp_groups g ON g.jid = m.chat_jid
+     ORDER BY last.id DESC LIMIT 300`,
+    [type]
+  )
+  res.json({ items: result.rows })
+})
+
+// GET /admin/whatsapp/chats/:jid/messages?before=<id> — 100 at a time, oldest first.
+router.get('/whatsapp/chats/:jid/messages', requireRole('superadmin'), async (req, res) => {
+  await ensureChatLogTables()
+  const before = Number(req.query.before) || null
+  const result = await query(
+    `SELECT id, sender_name, from_bot, kind, text, created_at FROM whatsapp_messages
+     WHERE chat_jid = $1 AND ($2::bigint IS NULL OR id < $2)
+     ORDER BY id DESC LIMIT 100`,
+    [req.params.jid, before]
+  )
+  res.json({ items: result.rows.reverse(), more: result.rows.length === 100 })
+})
+
+// DELETE /admin/whatsapp/chats/:jid — one conversation; /admin/whatsapp/chats — all of them.
+router.delete('/whatsapp/chats/:jid', requireRole('superadmin'), async (req, res) => {
+  await ensureChatLogTables()
+  const result = await query(`DELETE FROM whatsapp_messages WHERE chat_jid = $1`, [req.params.jid])
+  await logAction(req.user.id, 'whatsapp.chat_delete', 'whatsapp_chat', req.params.jid)
+  res.json({ deleted: result.rowCount })
+})
+
+router.delete('/whatsapp/chats', requireRole('superadmin'), async (req, res) => {
+  await ensureChatLogTables()
+  const result = await query(`DELETE FROM whatsapp_messages`)
+  await logAction(req.user.id, 'whatsapp.chat_delete_all', 'whatsapp_chat', 'all')
+  res.json({ deleted: result.rowCount })
+})
+
+// GET /admin/whatsapp/chat-storage — how full the chat log is.
+router.get('/whatsapp/chat-storage', requireRole('superadmin'), async (req, res) => {
+  res.json(await chatLogUsage())
+})
+
+// GET /admin/whatsapp/chats-export — every saved message, for the zip download.
+router.get('/whatsapp/chats-export', requireRole('superadmin'), async (req, res) => {
+  await ensureChatLogTables()
+  const result = await query(
+    `SELECT m.chat_jid, m.chat_type, COALESCE(g.name, m.chat_name) AS chat_name, m.sender_name, m.from_bot, m.kind, m.text, m.created_at
+     FROM whatsapp_messages m LEFT JOIN whatsapp_groups g ON g.jid = m.chat_jid
+     ORDER BY m.chat_jid, m.id LIMIT 300000`
+  )
+  await logAction(req.user.id, 'whatsapp.chat_export', 'whatsapp_chat', 'all')
   res.json({ items: result.rows })
 })
 

@@ -8,6 +8,7 @@ import { query } from '../db/pool.js'
 import { sendPush } from '../services/pushService.js'
 import { getBotSettings } from '../services/botSettings.js'
 import { ensureGroupSettingsColumn, withGroupDefaults } from '../services/groupSettings.js'
+import { ensureChatLogTables, saveChatMessages } from '../services/botChatLog.js'
 import { verseOfTheDay, tipOfTheDay } from '../services/dailyInspiration.js'
 
 const ACTIVITY_KEEP = 500
@@ -92,17 +93,19 @@ router.get('/groups', async (req, res) => {
 })
 
 // POST /bot/groups  { jid, name, memberCount } — the bot reports a group it
-// is in. A group seen for the first time is switched on straight away and
-// every superadmin gets a push, so they can switch it off if it's wrong.
+// is in. A group seen for the first time waits under "New groups" in the
+// admin app (Bro Paul stays silent there) until a superadmin introduces him
+// or starts him quietly; every superadmin gets a push about it.
 router.post('/groups', async (req, res) => {
   const { jid, name, memberCount } = req.body || {}
   if (typeof jid !== 'string' || !jid.endsWith('@g.us')) return res.status(400).json({ error: 'Invalid group id' })
   const cleanName = name ? String(name).slice(0, 120) : null
   const count = Number.isInteger(memberCount) ? memberCount : null
+  await ensureGroupSettingsColumn()
 
   const result = await query(
-    `INSERT INTO whatsapp_groups (jid, name, member_count)
-     VALUES ($1, $2, $3)
+    `INSERT INTO whatsapp_groups (jid, name, member_count, enabled, settings)
+     VALUES ($1, $2, $3, FALSE, '{"started": false}'::jsonb)
      ON CONFLICT (jid) DO UPDATE
        SET name = COALESCE(EXCLUDED.name, whatsapp_groups.name),
            member_count = COALESCE(EXCLUDED.member_count, whatsapp_groups.member_count),
@@ -118,7 +121,7 @@ router.post('/groups', async (req, res) => {
       category: 'updates',
       userIds: admins.rows.map((r) => r.id),
       title: 'Bro Paul joined a new WhatsApp group',
-      body: `${cleanName || 'A new group'}${count ? ` (${count} members)` : ''}. He's chatting there now. Tap to manage.`,
+      body: `${cleanName || 'A new group'}${count ? ` (${count} members)` : ''}. He's waiting quietly: tap to introduce him or start him there.`,
       url: '/admin/whatsapp',
       tag: `wa-group-${jid}`,
     }).catch((err) => console.error('New group push failed:', err.message))
@@ -145,12 +148,22 @@ router.get('/config', async (req, res) => {
 })
 
 // GET /bot/outbox — messages a superadmin asked the bot to send.
+// kind 'intro' = introduce himself there (the bot writes it from the group's settings).
 router.get('/outbox', async (req, res) => {
+  await ensureChatLogTables()
   const result = await query(
-    `SELECT id, group_jid, text FROM whatsapp_bot_outbox
+    `SELECT id, group_jid, text, kind FROM whatsapp_bot_outbox
      WHERE status = 'pending' ORDER BY created_at ASC LIMIT 10`
   )
   res.json({ items: result.rows })
+})
+
+// POST /bot/messages  { messages: [{ chatJid, chatType, chatName, senderName, fromBot, kind, text, at }] }
+// Conversations for the admin app's Chats tab, batched by the bot.
+router.post('/messages', async (req, res) => {
+  const messages = Array.isArray(req.body?.messages) ? req.body.messages.slice(0, 100) : []
+  const saved = await saveChatMessages(messages)
+  res.json({ saved })
 })
 
 // POST /bot/outbox/:id  { status: 'sent' | 'failed', error? }

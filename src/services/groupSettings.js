@@ -8,12 +8,18 @@
 //                          questions or lecture notes
 //   prayer   - during a prayer session: 'quiet', 'amen' (🙏 the prayers)
 //              or 'join' (also adds a short prayer now and then)
+//   revealAi - whether Bro Paul presents himself as an AI there (he never
+//              claims to be human if sincerely asked)
+//   started  - false for a group he was just added to: he stays silent
+//              until a superadmin introduces him or starts him quietly
 //   the rest - which kinds of posts the bot may send there
 import { query } from '../db/pool.js'
 
 export const GROUP_SETTING_DEFAULTS = {
   audience: 'campus',
   prayer: 'amen',
+  revealAi: true,
+  started: true,
   bookOfDay: true,
   morningPost: true,
   promos: true,
@@ -25,7 +31,7 @@ export const GROUP_SETTING_DEFAULTS = {
 
 const AUDIENCES = ['campus', 'mixed', 'general']
 const PRAYER_MODES = ['quiet', 'amen', 'join']
-const BOOL_KEYS = ['bookOfDay', 'morningPost', 'promos', 'welcome', 'chimeIn', 'newMonth', 'birthdays']
+const BOOL_KEYS = ['bookOfDay', 'morningPost', 'promos', 'welcome', 'chimeIn', 'newMonth', 'birthdays', 'revealAi', 'started']
 
 // Keeps only known keys with sane values.
 export function cleanGroupSettings(input = {}) {
