@@ -12,6 +12,7 @@ import { sendPush } from '../services/pushService.js'
 import { getBotSettings, cleanBotSettings } from '../services/botSettings.js'
 import { ensureGroupSettingsColumn, cleanGroupSettings, withGroupDefaults } from '../services/groupSettings.js'
 import { ensureChatLogTables, chatLogUsage } from '../services/botChatLog.js'
+import { isWhatsappRequest } from '../services/whatsappRequests.js'
 
 const router = Router()
 
@@ -686,11 +687,15 @@ router.patch('/resources/:id/organize', async (req, res) => {
 // & Grow Rich" belongs to the AI collections/semantic-matching feature,
 // not this one.
 router.get('/requests', async (req, res) => {
+  // Requests filed by Bro Paul from WhatsApp have no library user: their
+  // WhatsApp name is shown instead.
   const result = await query(
     `SELECT mr.id, mr.title, mr.course_code, mr.notes, mr.details, mr.created_at,
-            u.id AS requester_id, u.name AS requester_name, u.avatar_url AS requester_avatar_url
+            u.id AS requester_id,
+            COALESCE(u.name, (COALESCE(mr.details->>'whatsappName', 'Someone') || ' (WhatsApp)')) AS requester_name,
+            u.avatar_url AS requester_avatar_url
      FROM material_requests mr
-     JOIN users u ON u.id = mr.user_id
+     LEFT JOIN users u ON u.id = mr.user_id
      WHERE mr.status = 'open'
      ORDER BY mr.created_at ASC`
   )
@@ -768,10 +773,35 @@ router.patch('/requests/:id', async (req, res) => {
 
   const result = await query(
     `UPDATE material_requests SET status = $1, resolved_by = $2, resolved_at = now(), fulfilled_resource_id = $3
-     WHERE id = $4 RETURNING user_id, title`,
+     WHERE id = $4 RETURNING user_id, title, details`,
     [status, req.user.id, linked?.id || null, req.params.id]
   )
   if (result.rows.length === 0) return res.status(404).json({ error: 'Request not found' })
+
+  await logAction(req.user.id, 'request.resolve', 'material_request', req.params.id, {
+    status,
+    reason: declineReason,
+    resourceId: linked?.id,
+  })
+
+  // Asked on WhatsApp (no library account): Bro Paul tells them in a DM.
+  const { user_id: requesterId, title: requestTitle, details } = result.rows[0]
+  if (!requesterId) {
+    if (isWhatsappRequest(details)) {
+      const site = (process.env.PUBLIC_SITE_URL || 'https://rcf-mouau-library.vercel.app').replace(/\/$/, '')
+      const name = details.whatsappName ? ` ${details.whatsappName.split(' ')[0]}` : ''
+      const text =
+        status === 'fulfilled'
+          ? linked
+            ? `Good news${name}! 🎉 Remember you asked for "${requestTitle}"? It's now in the library:\n👉 ${site}/library/${linked.id}`
+            : `Good news${name}! 🎉 "${requestTitle}", which you asked for, has been added to the library. Search for it here: ${site}/library`
+          : `Hi${name}, about "${requestTitle}" that you asked for: the library team couldn't add it. Reason: ${declineReason}`
+      await query(`INSERT INTO whatsapp_bot_outbox (group_jid, text, created_by) VALUES ($1, $2, $3)`, [details.whatsappId, text, req.user.id]).catch((err) =>
+        console.error('WhatsApp request reply failed:', err.message)
+      )
+    }
+    return res.json({ ok: true })
+  }
 
   sendPushToUser(result.rows[0].user_id, {
     title: status === 'fulfilled' ? 'Your request was fulfilled!' : 'Update on your request',
@@ -783,12 +813,6 @@ router.patch('/requests/:id', async (req, res) => {
         : `"${result.rows[0].title}" was declined. Reason: ${declineReason}`,
     url: linked ? `/library/${linked.id}` : '/contribute/request',
   }).catch((err) => console.error('Push notify failed:', err.message))
-
-  await logAction(req.user.id, 'request.resolve', 'material_request', req.params.id, {
-    status,
-    reason: declineReason,
-    resourceId: linked?.id,
-  })
 
   if (status === 'fulfilled') {
     await query(
@@ -1335,7 +1359,7 @@ const ACTIVITY_CATEGORIES = {
   private: ['private'],
   posts: ['morning', 'featured', 'promo', 'new-month', 'welcome', 'intro', 'cleanup'],
   announcements: ['announcement', 'send'],
-  replies: ['reply', 'search', 'chime', 'prayer'],
+  replies: ['reply', 'search', 'chime', 'prayer', 'request'],
   reactions: ['react', 'sticker', 'birthday'],
 }
 

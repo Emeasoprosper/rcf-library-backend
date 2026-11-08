@@ -10,6 +10,7 @@ import { getBotSettings } from '../services/botSettings.js'
 import { ensureGroupSettingsColumn, withGroupDefaults } from '../services/groupSettings.js'
 import { ensureChatLogTables, saveChatMessages } from '../services/botChatLog.js'
 import { verseOfTheDay, tipOfTheDay } from '../services/dailyInspiration.js'
+import { ensureWhatsappRequests } from '../services/whatsappRequests.js'
 
 const ACTIVITY_KEEP = 500
 
@@ -202,6 +203,51 @@ router.get('/config', async (req, res) => {
     query(`SELECT title, text FROM whatsapp_bot_facts ORDER BY created_at ASC LIMIT 100`),
   ])
   res.json({ settings, facts: facts.rows })
+})
+
+// POST /bot/requests  { title, courseCode?, whatsappId, whatsappName?, groupJid? }
+// Someone asked Bro Paul for a material the library doesn't have: file it as
+// a material request so admins see it with the others. The same person asking
+// for the same thing again doesn't create a second request.
+router.post('/requests', async (req, res) => {
+  const title = String(req.body.title || '').trim().slice(0, 200)
+  const whatsappId = String(req.body.whatsappId || '').trim().slice(0, 100)
+  if (!title || !whatsappId) return res.status(400).json({ error: 'title and whatsappId are required' })
+  const courseCode = String(req.body.courseCode || '').trim().slice(0, 20) || null
+  const whatsappName = String(req.body.whatsappName || '').trim().slice(0, 80) || null
+  const groupJid = String(req.body.groupJid || '').trim().slice(0, 100)
+  const group = groupJid
+    ? (await query(`SELECT name FROM whatsapp_groups WHERE jid = $1`, [groupJid]).catch(() => ({ rows: [] }))).rows[0]?.name || 'a WhatsApp group'
+    : null
+
+  await ensureWhatsappRequests()
+  const existing = await query(
+    `SELECT id FROM material_requests
+     WHERE status = 'open' AND lower(title) = lower($1) AND details->>'whatsappId' = $2`,
+    [title, whatsappId]
+  )
+  if (existing.rows.length) return res.json({ ok: true, duplicate: true })
+
+  await query(
+    `INSERT INTO material_requests (user_id, title, course_code, notes, details)
+     VALUES (NULL, $1, $2, $3, $4)`,
+    [
+      title,
+      courseCode,
+      `Asked on WhatsApp${whatsappName ? ` by ${whatsappName}` : ''}${group ? ` in ${group}` : ' (private chat)'}`,
+      JSON.stringify({ source: 'whatsapp', whatsappId, whatsappName, group }),
+    ]
+  )
+  const admins = await query(`SELECT id FROM users WHERE role IN ('admin', 'superadmin') AND is_suspended = false`)
+  sendPush({
+    category: 'updates',
+    userIds: admins.rows.map((r) => r.id),
+    title: 'New material request from WhatsApp',
+    body: `${whatsappName || 'Someone'} asked Bro Paul for "${title}", which the library doesn't have yet.`,
+    url: '/admin/requests',
+    tag: 'wa-request',
+  }).catch((err) => console.error('Request push failed:', err.message))
+  res.status(201).json({ ok: true })
 })
 
 // GET /bot/outbox — messages a superadmin asked the bot to send.
