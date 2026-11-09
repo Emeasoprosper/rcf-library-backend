@@ -215,6 +215,8 @@ router.post('/requests', async (req, res) => {
   if (!title || !whatsappId) return res.status(400).json({ error: 'title and whatsappId are required' })
   const courseCode = String(req.body.courseCode || '').trim().slice(0, 20) || null
   const whatsappName = String(req.body.whatsappName || '').trim().slice(0, 80) || null
+  // Their whole message, word for word, so admins see exactly what was asked.
+  const asked = String(req.body.asked || '').trim().slice(0, 500) || null
   const groupJid = String(req.body.groupJid || '').trim().slice(0, 100)
   const group = groupJid
     ? (await query(`SELECT name FROM whatsapp_groups WHERE jid = $1`, [groupJid]).catch(() => ({ rows: [] }))).rows[0]?.name || 'a WhatsApp group'
@@ -234,8 +236,8 @@ router.post('/requests', async (req, res) => {
     [
       title,
       courseCode,
-      `Asked on WhatsApp${whatsappName ? ` by ${whatsappName}` : ''}${group ? ` in ${group}` : ' (private chat)'}`,
-      JSON.stringify({ source: 'whatsapp', whatsappId, whatsappName, group }),
+      `Asked on WhatsApp${whatsappName ? ` by ${whatsappName}` : ''}${group ? ` in ${group}` : ' (private chat)'}${asked ? `: "${asked}"` : ''}`,
+      JSON.stringify({ source: 'whatsapp', whatsappId, whatsappName, group, asked }),
     ]
   )
   const admins = await query(`SELECT id FROM users WHERE role IN ('admin', 'superadmin') AND is_suspended = false`)
