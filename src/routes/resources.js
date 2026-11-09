@@ -247,7 +247,10 @@ router.post('/:id/share', attachUser, requireAuth, async (req, res) => {
     token = confirmed.rows[0].token
   }
 
-  const shareBaseUrl = process.env.SHARE_BASE_URL || `${req.protocol}://${req.get('host')}`
+  // The website's address (not the backend's): it shows the book's cover and
+  // title as the link preview on WhatsApp and elsewhere (student-dashboard
+  // api/book.js), then opens the book in the app.
+  const shareBaseUrl = (process.env.FRONTEND_URLS || '').split(',').map((u) => u.trim()).find((u) => u.startsWith('https://')) || 'https://rcf-mouau-library.vercel.app'
   res.json({ token, shareUrl: `${shareBaseUrl}/s/${token}` })
 })
 
