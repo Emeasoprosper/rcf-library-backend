@@ -13,6 +13,7 @@ import { getBotSettings, cleanBotSettings } from '../services/botSettings.js'
 import { ensureGroupSettingsColumn, cleanGroupSettings, withGroupDefaults } from '../services/groupSettings.js'
 import { ensureChatLogTables, chatLogUsage } from '../services/botChatLog.js'
 import { isWhatsappRequest } from '../services/whatsappRequests.js'
+import { ensureReviewColumns } from '../services/appReviews.js'
 
 const router = Router()
 
@@ -815,9 +816,11 @@ router.patch('/requests/:id', async (req, res) => {
       const name = details.whatsappName ? ` ${details.whatsappName.split(' ')[0]}` : ''
       // Many ask for the file to be sent "raw" in the chat. Instead: it's at
       // the link, and once downloaded in the app it reads offline with no data.
+      // Warm, never a refusal: the link is presented as the better deal for them.
       const rawNote =
-        `\n\n📥 It's available right there in the link. Open it, sign in and tap the download button: it's saved inside the app, so you can read it offline with no data.` +
-        `\n📴 Try it: after downloading, switch off your data and open the app. It's in Downloads, ready to read.`
+        `\n\n📥 Tap the link, sign in and hit download. It saves right inside the app, so you can read it anytime, even offline with zero data, and it won't eat your phone storage or get lost in chats.` +
+        `\n📴 Try it: once it's downloaded, switch off your data and open the app. It'll be waiting for you in Downloads.` +
+        `\n🤝 We share books through the app rather than as loose files so they stay safe and free for every RCFite, and the people who upload them keep sharing. If anything gives you trouble, just reply here and I'll walk you through it.`
       const text =
         status === 'fulfilled'
           ? linked
@@ -1206,6 +1209,66 @@ router.get('/ratings-summary', async (req, res) => {
     `SELECT COUNT(*)::int AS count, COALESCE(AVG(stars), 0)::float AS average FROM app_ratings`
   )
   res.json(result.rows[0])
+})
+
+// GET /admin/reviews?kind=review|complaint&stars=1..5&before=<iso>
+// The reviews page: summary (average, count, 1-5 breakdown, complaints,
+// last-30-days average) plus the newest 50 matching entries.
+router.get('/reviews', async (req, res) => {
+  await ensureReviewColumns()
+  const kind = ['review', 'complaint'].includes(req.query.kind) ? req.query.kind : null
+  const stars = Number(req.query.stars) >= 1 && Number(req.query.stars) <= 5 ? Number(req.query.stars) : null
+  const before = req.query.before && !Number.isNaN(Date.parse(req.query.before)) ? req.query.before : null
+
+  const [summary, dist, rows] = await Promise.all([
+    query(`SELECT COUNT(*)::int AS count,
+                  COALESCE(AVG(stars), 0)::float AS average,
+                  COUNT(*) FILTER (WHERE kind = 'complaint')::int AS complaints,
+                  COUNT(*) FILTER (WHERE kind = 'complaint' AND resolved_at IS NULL)::int AS open_complaints,
+                  COUNT(*) FILTER (WHERE review IS NOT NULL)::int AS written,
+                  COALESCE(AVG(stars) FILTER (WHERE created_at > now() - interval '30 days'), 0)::float AS average_30d,
+                  COALESCE(AVG(stars) FILTER (WHERE created_at BETWEEN now() - interval '60 days' AND now() - interval '30 days'), 0)::float AS average_prev_30d
+           FROM app_ratings`),
+    query(`SELECT stars, COUNT(*)::int AS n FROM app_ratings GROUP BY stars`),
+    query(
+      `SELECT r.id, r.stars, r.review, r.kind, r.tags, r.trigger, r.created_at, r.resolved_at,
+              u.id AS user_id, u.name AS user_name, u.avatar_url AS user_avatar
+       FROM app_ratings r JOIN users u ON u.id = r.user_id
+       WHERE ($1::text IS NULL OR r.kind = $1)
+         AND ($2::int IS NULL OR r.stars = $2)
+         AND ($3::timestamptz IS NULL OR r.created_at < $3)
+       ORDER BY r.created_at DESC LIMIT 50`,
+      [kind, stars, before]
+    ),
+  ])
+
+  const distribution = [1, 2, 3, 4, 5].map((s) => dist.rows.find((r) => r.stars === s)?.n || 0)
+  res.json({
+    summary: { ...summary.rows[0], distribution },
+    items: rows.rows.map((r) => ({
+      id: r.id,
+      stars: r.stars,
+      review: r.review,
+      kind: r.kind,
+      tags: r.tags || [],
+      trigger: r.trigger,
+      createdAt: r.created_at,
+      resolvedAt: r.resolved_at,
+      user: { id: r.user_id, name: r.user_name, avatarUrl: r.user_avatar },
+    })),
+  })
+})
+
+// PATCH /admin/reviews/:id  { resolved: boolean } — mark a complaint handled.
+router.patch('/reviews/:id', async (req, res) => {
+  await ensureReviewColumns()
+  const result = await query(
+    `UPDATE app_ratings SET resolved_at = CASE WHEN $2 THEN now() ELSE NULL END WHERE id = $1 RETURNING id, resolved_at`,
+    [req.params.id, Boolean(req.body?.resolved)]
+  )
+  if (!result.rows.length) return res.status(404).json({ error: 'Not found' })
+  await logAction(req.user.id, req.body?.resolved ? 'review.resolve' : 'review.reopen', 'app_rating', req.params.id)
+  res.json({ ok: true, resolvedAt: result.rows[0].resolved_at })
 })
 
 // GET /admin/feedback

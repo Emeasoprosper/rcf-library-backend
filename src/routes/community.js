@@ -4,6 +4,7 @@ import { query } from '../db/pool.js'
 import { attachUser, requireAuth } from '../middleware/auth.js'
 import webpush from 'web-push'
 import { sendPush } from '../services/pushService.js'
+import { ensureReviewColumns } from '../services/appReviews.js'
 
 webpush.setVapidDetails(
   'mailto:support@rcf-mouau-library.vercel.app',
@@ -585,12 +586,69 @@ export async function sendPushToUser(userId, { title, body, url, image = null })
   )
 }
 
+// POST /ratings  { stars, review?, kind?: 'review'|'complaint', tags?: string[], trigger? }
+// trigger = what prompted it ('second_day', 'first_download', 'settings', …),
+// so admins can see which moments people rate.
 router.post('/ratings', attachUser, requireAuth, async (req, res) => {
   const { stars } = req.body
   if (!Number.isInteger(stars) || stars < 1 || stars > 5) return res.status(400).json({ error: 'stars must be 1-5' })
-  await query('INSERT INTO app_ratings (user_id, stars) VALUES ($1, $2)', [req.user.id, stars])
+  const review = String(req.body.review || '').trim().slice(0, 2000) || null
+  const kind = req.body.kind === 'complaint' ? 'complaint' : 'review'
+  const tags = Array.isArray(req.body.tags)
+    ? req.body.tags.map((t) => String(t).trim().slice(0, 40)).filter(Boolean).slice(0, 8)
+    : []
+  const trigger = String(req.body.trigger || '').trim().slice(0, 40) || null
+  await ensureReviewColumns()
+  await query(
+    'INSERT INTO app_ratings (user_id, stars, review, kind, tags, trigger) VALUES ($1, $2, $3, $4, $5, $6)',
+    [req.user.id, stars, review, kind, tags, trigger]
+  )
   res.status(201).json({ ok: true })
+  // After replying: tell every admin, even for a plain star rating.
+  notifyAdminsOfRating({ userId: req.user.id, stars, review, kind, tags }).catch((err) =>
+    console.error('Rating notify failed:', err.message)
+  )
 })
+
+// Every admin gets a push and an in-app notification for each rating,
+// review or complaint, with the running totals so they see the trend:
+// "⭐⭐⭐⭐ Ada rated 4/5 · Average 4.5 from 23 ratings (5★ 14 · 4★ 6 · …)"
+async function notifyAdminsOfRating({ userId, stars, review, kind, tags }) {
+  const [who, totals, dist, admins] = await Promise.all([
+    query('SELECT name FROM users WHERE id = $1', [userId]),
+    query(`SELECT COUNT(*)::int AS count, COALESCE(AVG(stars), 0)::float AS average,
+                  COUNT(*) FILTER (WHERE kind = 'complaint' AND resolved_at IS NULL)::int AS open_complaints
+           FROM app_ratings`),
+    query('SELECT stars, COUNT(*)::int AS n FROM app_ratings GROUP BY stars'),
+    query(`SELECT id FROM users WHERE role IN ('admin', 'superadmin') AND is_suspended = false`),
+  ])
+  const adminIds = admins.rows.map((r) => r.id)
+  if (!adminIds.length) return
+
+  const name = who.rows[0]?.name?.split(' ')[0] || 'A member'
+  const { count, average, open_complaints: openComplaints } = totals.rows[0]
+  const per = [5, 4, 3, 2, 1].map((s) => `${s}★ ${dist.rows.find((r) => r.stars === s)?.n || 0}`).join(' · ')
+  const totalsLine = `Average ${average.toFixed(1)} from ${count} rating${count === 1 ? '' : 's'} (${per})`
+  const starsText = '⭐'.repeat(stars)
+  const said = review ? `"${review.length > 140 ? `${review.slice(0, 137)}…` : review}"` : tags.length ? tags.join(', ') : ''
+
+  const title =
+    kind === 'complaint'
+      ? `⚠️ Complaint from ${name} (${stars}/5)`
+      : review
+        ? `${starsText} New review from ${name}`
+        : `${starsText} ${name} rated the app ${stars}/5`
+  const body = [said, totalsLine, kind === 'complaint' && openComplaints ? `${openComplaints} open complaint${openComplaints === 1 ? '' : 's'}` : '']
+    .filter(Boolean)
+    .join('\n')
+
+  await query(
+    `INSERT INTO notifications (user_id, type, title, body, link_to)
+     SELECT unnest($1::uuid[]), $2, $3, $4, '/admin/reviews'`,
+    [adminIds, kind === 'complaint' ? 'app_complaint' : 'app_rating', title, body]
+  )
+  await sendPush({ category: 'updates', userIds: adminIds, title, body, url: '/admin/reviews', tag: `app-rating-${Date.now()}` })
+}
 
 router.post('/feedback', attachUser, requireAuth, async (req, res) => {
   const { type, message } = req.body
