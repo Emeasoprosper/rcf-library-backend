@@ -679,6 +679,29 @@ router.patch('/resources/:id/organize', async (req, res) => {
   res.json({ ok: true })
 })
 
+// GET /admin/birthdays — every member who has entered a birthday, in
+// calendar order (Jan 1 first), for the month-by-month birthday list.
+// `hidden` = they chose not to show it to other members (admins still see it).
+router.get('/birthdays', async (req, res) => {
+  const result = await query(
+    `SELECT id, name, avatar_url, birth_month, birth_day,
+            (birthday_public = false OR show_profile = false) AS hidden
+     FROM users
+     WHERE is_suspended = false AND birth_month BETWEEN 1 AND 12 AND birth_day BETWEEN 1 AND 31
+     ORDER BY birth_month, birth_day, name`
+  )
+  res.json({
+    items: result.rows.map((u) => ({
+      id: u.id,
+      name: u.name,
+      avatarUrl: u.avatar_url,
+      month: u.birth_month,
+      day: u.birth_day,
+      hidden: u.hidden,
+    })),
+  })
+})
+
 // GET /admin/requests — groups requests that are clearly about the same
 // material (same course_code, or the exact same title once trimmed and
 // lowercased) so the admin sees "4 students want this" instead of 4
@@ -790,11 +813,16 @@ router.patch('/requests/:id', async (req, res) => {
     if (isWhatsappRequest(details)) {
       const site = (process.env.PUBLIC_SITE_URL || 'https://rcf-mouau-library.vercel.app').replace(/\/$/, '')
       const name = details.whatsappName ? ` ${details.whatsappName.split(' ')[0]}` : ''
+      // Many ask for the file to be sent "raw" in the chat. Instead: it's at
+      // the link, and once downloaded in the app it reads offline with no data.
+      const rawNote =
+        `\n\n📥 It's available right there in the link. Open it, sign in and tap the download button: it's saved inside the app, so you can read it offline with no data.` +
+        `\n📴 Try it: after downloading, switch off your data and open the app. It's in Downloads, ready to read.`
       const text =
         status === 'fulfilled'
           ? linked
-            ? `Good news${name}! 🎉 Remember you asked for "${requestTitle}"? It's now in the library:\n👉 ${site}/library/${linked.id}`
-            : `Good news${name}! 🎉 "${requestTitle}", which you asked for, has been added to the library. Search for it here: ${site}/library`
+            ? `Good news${name}! 🎉 Remember you asked for "${requestTitle}"? It's now in the library:\n👉 ${site}/library/${linked.id}${rawNote}`
+            : `Good news${name}! 🎉 "${requestTitle}", which you asked for, has been added to the library. Search for it here: ${site}/library${rawNote}`
           : `Hi${name}, about "${requestTitle}" that you asked for: the library team couldn't add it. Reason: ${declineReason}`
       await query(`INSERT INTO whatsapp_bot_outbox (group_jid, text, created_by) VALUES ($1, $2, $3)`, [details.whatsappId, text, req.user.id]).catch((err) =>
         console.error('WhatsApp request reply failed:', err.message)

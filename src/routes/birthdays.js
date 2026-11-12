@@ -21,12 +21,15 @@ router.get('/today', attachUser, requireAuth, async (req, res) => {
     `SELECT id, name, avatar_url, contact_public, phone_number, whatsapp_number,
             COUNT(*) OVER()::int AS total
      FROM users
-     WHERE is_suspended = false AND birthday_public = true AND show_profile = true
+     WHERE is_suspended = false
+       -- Others only see public birthdays, but the celebrant always gets
+       -- their own popup, even with a hidden profile or birthday.
+       AND ((birthday_public = true AND show_profile = true) OR id = $4)
        AND ((birth_month = $1 AND birth_day = $2)
             OR ($3::boolean AND birth_month = 2 AND birth_day = 29))
      ORDER BY name ASC
      LIMIT 12`,
-    [m, d, includeFeb29]
+    [m, d, includeFeb29, req.user.id]
   )
 
   const items = result.rows.map((u) => ({
@@ -39,7 +42,9 @@ router.get('/today', attachUser, requireAuth, async (req, res) => {
   }))
   items.sort((a, b) => Number(b.isYou) - Number(a.isYou)) // your own card first
 
-  res.setHeader('Cache-Control', 'private, max-age=300')
+  // Short cache: a longer one could hand back yesterday's (empty) list
+  // just after midnight.
+  res.setHeader('Cache-Control', 'private, max-age=60')
   res.json({ total: result.rows[0]?.total || 0, items })
 })
 
