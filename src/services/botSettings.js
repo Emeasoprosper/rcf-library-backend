@@ -28,9 +28,23 @@ export const BOT_SETTING_DEFAULTS = {
   // Book of the day only picks books with an open licence (public domain,
   // Creative Commons), i.e. ones added through the app's free-book search.
   featuredOnlyLicensed: false,
+  // AI library (admin app > AI Library):
+  // aiLectureNotes     - lecture notes asked for (app or WhatsApp) that the
+  //                      library doesn't have are written by AI
+  // aiNotesAutoPublish - those notes go live without review
+  // askForMaterials    - past questions nobody has: ask the groups that
+  //                      have "Ask for materials" switched on
+  // autoUploadMaterials - files people send Bro Paul (DM, or in a group when
+  //                      it's clearly for the library) are added by him
+  // autoPublishUploads - those uploads go live without review
+  aiLectureNotes: true,
+  aiNotesAutoPublish: true,
+  askForMaterials: true,
+  autoUploadMaterials: true,
+  autoPublishUploads: true,
 }
 
-const BOOL_KEYS = ['chimeIn', 'welcomeNewMembers', 'birthdayWishes', 'newMonthWishes', 'reactions', 'answerUntagged', 'privateChats', 'morningPost', 'stickers', 'saveChats', 'chatLogAutoDelete', 'voiceReplies', 'featuredOnlyLicensed']
+const BOOL_KEYS = ['chimeIn', 'welcomeNewMembers', 'birthdayWishes', 'newMonthWishes', 'reactions', 'answerUntagged', 'privateChats', 'morningPost', 'stickers', 'saveChats', 'chatLogAutoDelete', 'voiceReplies', 'featuredOnlyLicensed', 'aiLectureNotes', 'aiNotesAutoPublish', 'askForMaterials', 'autoUploadMaterials', 'autoPublishUploads']
 const INT_RANGES = {
   promoEveryHours: [0, 24 * 14],
   activeFromHour: [0, 23],

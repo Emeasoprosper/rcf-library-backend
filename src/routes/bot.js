@@ -10,7 +10,15 @@ import { getBotSettings } from '../services/botSettings.js'
 import { ensureGroupSettingsColumn, withGroupDefaults } from '../services/groupSettings.js'
 import { ensureChatLogTables, saveChatMessages } from '../services/botChatLog.js'
 import { verseOfTheDay, tipOfTheDay } from '../services/dailyInspiration.js'
-import { ensureWhatsappRequests } from '../services/whatsappRequests.js'
+import { ensureWhatsappRequests, SITE_URL } from '../services/whatsappRequests.js'
+import multer from 'multer'
+import {
+  PAST_QUESTION_RE,
+  askGroupsForMaterial,
+  looksLikeLectureNotes,
+  publishBotUpload,
+  requestLectureNotes,
+} from '../services/aiLibrary.js'
 
 const ACTIVITY_KEEP = 500
 
@@ -222,24 +230,54 @@ router.post('/requests', async (req, res) => {
     ? (await query(`SELECT name FROM whatsapp_groups WHERE jid = $1`, [groupJid]).catch(() => ({ rows: [] }))).rows[0]?.name || 'a WhatsApp group'
     : null
 
+  // type: 'lecture_notes' | 'past_question' | … as Bro Paul understood it.
+  const askedText = `${title} ${asked || ''}`
+  const type = ['lecture_notes', 'past_question', 'book', 'audio'].includes(req.body.type)
+    ? req.body.type
+    : PAST_QUESTION_RE.test(askedText) ? 'past_question' : looksLikeLectureNotes(askedText) ? 'lecture_notes' : null
+
   await ensureWhatsappRequests()
   const existing = await query(
     `SELECT id FROM material_requests
      WHERE status = 'open' AND lower(title) = lower($1) AND details->>'whatsappId' = $2`,
     [title, whatsappId]
   )
-  if (existing.rows.length) return res.json({ ok: true, duplicate: true })
+  if (existing.rows.length) return res.json({ ok: true, duplicate: true, ...(await afterRequest(existing.rows[0].id)) })
 
-  await query(
+  const inserted = await query(
     `INSERT INTO material_requests (user_id, title, course_code, notes, details)
-     VALUES (NULL, $1, $2, $3, $4)`,
+     VALUES (NULL, $1, $2, $3, $4) RETURNING id`,
     [
       title,
       courseCode,
       `Asked on WhatsApp${whatsappName ? ` by ${whatsappName}` : ''}${group ? ` in ${group}` : ' (private chat)'}${asked ? `: "${asked}"` : ''}`,
-      JSON.stringify({ source: 'whatsapp', whatsappId, whatsappName, group, asked }),
+      JSON.stringify({ source: 'whatsapp', whatsappId, whatsappName, group, asked, type }),
     ]
   )
+  const extra = await afterRequest(inserted.rows[0].id)
+
+  // Lecture notes: the AI writes them (Bro Paul DMs the link when ready).
+  // Past questions: the groups that allow it are asked who has them.
+  async function afterRequest(requestId) {
+    try {
+      if (type === 'lecture_notes') {
+        const ai = await requestLectureNotes({ courseCode, title, requestIds: [requestId], requestedBy: `WhatsApp: ${whatsappName || 'member'}` })
+        return { aiNotes: ai.status, aiNotesUrl: ai.resourceId ? `${SITE_URL}/library/${ai.resourceId}` : undefined }
+      }
+      if (type === 'past_question') {
+        const settings = await getBotSettings()
+        const here = groupJid
+          ? (await query(`SELECT settings FROM whatsapp_groups WHERE jid = $1`, [groupJid])).rows[0]?.settings?.askForMaterials === true
+          : false
+        const askedGroups = await askGroupsForMaterial({ title, courseCode, askerName: whatsappName, skipGroup: groupJid })
+        return { askHere: Boolean(settings.askForMaterials && here), askedGroups }
+      }
+    } catch (err) {
+      console.error('Request follow-up failed:', err.message)
+    }
+    return {}
+  }
+
   const admins = await query(`SELECT id FROM users WHERE role IN ('admin', 'superadmin') AND is_suspended = false`)
   sendPush({
     category: 'updates',
@@ -249,7 +287,29 @@ router.post('/requests', async (req, res) => {
     url: '/admin/requests',
     tag: 'wa-request',
   }).catch((err) => console.error('Request push failed:', err.message))
-  res.status(201).json({ ok: true })
+  res.status(201).json({ ok: true, ...extra })
+})
+
+// POST /bot/uploads  multipart: files[] (+ caption, courseCode, type,
+// whatsappId, whatsappName, groupJid). Files someone sent Bro Paul for the
+// library: several photos become one PDF. Returns where it landed.
+const botUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 60 * 1024 * 1024, files: 20 } })
+router.post('/uploads', botUpload.array('files', 20), async (req, res) => {
+  const settings = await getBotSettings()
+  if (!settings.autoUploadMaterials) return res.status(403).json({ error: 'Uploads from WhatsApp are switched off' })
+  const files = (req.files || []).map((f) => ({ buffer: f.buffer, mimetype: f.mimetype, originalname: f.originalname }))
+  if (!files.length) return res.status(400).json({ error: 'No files' })
+  const groupJid = String(req.body.groupJid || '').trim()
+  const groupName = groupJid ? (await query(`SELECT name FROM whatsapp_groups WHERE jid = $1`, [groupJid]).catch(() => ({ rows: [] }))).rows[0]?.name || '' : ''
+  const result = await publishBotUpload({
+    files,
+    caption: String(req.body.caption || '').slice(0, 500),
+    courseCode: req.body.courseCode || null,
+    type: ['lecture_notes', 'past_question', 'book'].includes(req.body.type) ? req.body.type : null,
+    whatsappName: String(req.body.whatsappName || '').slice(0, 80),
+    groupName,
+  })
+  res.status(201).json(result)
 })
 
 // GET /bot/outbox — messages a superadmin asked the bot to send.

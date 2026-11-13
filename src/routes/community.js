@@ -5,6 +5,7 @@ import { attachUser, requireAuth } from '../middleware/auth.js'
 import webpush from 'web-push'
 import { sendPush } from '../services/pushService.js'
 import { ensureReviewColumns } from '../services/appReviews.js'
+import { looksLikeLectureNotes, requestLectureNotes } from '../services/aiLibrary.js'
 
 webpush.setVapidDetails(
   'mailto:support@rcf-mouau-library.vercel.app',
@@ -191,7 +192,27 @@ router.post('/requests', attachUser, requireAuth, async (req, res) => {
       details && typeof details === 'object' ? JSON.stringify(details) : '{}',
     ]
   )
-  res.status(201).json({ request: result.rows[0] })
+  const request = result.rows[0]
+
+  // Lecture notes the library doesn't have: the AI writes them, and the
+  // person gets a notification with the link when they're ready.
+  let aiNotes = null
+  const kind = details?.type || (looksLikeLectureNotes(`${title} ${notes || ''}`) ? 'lecture_notes' : null)
+  if (kind === 'lecture_notes') {
+    try {
+      const ai = await requestLectureNotes({
+        courseCode: courseCode?.trim() || null,
+        title: title.trim(),
+        level: details?.level || null,
+        requestIds: [request.id],
+        requestedBy: `App: ${req.user.name || 'member'}`,
+      })
+      aiNotes = { status: ai.status, resourceId: ai.resourceId || null }
+    } catch (err) {
+      console.error('AI notes request failed:', err.message)
+    }
+  }
+  res.status(201).json({ request, aiNotes })
 })
 
 router.get('/me/requests', attachUser, requireAuth, async (req, res) => {

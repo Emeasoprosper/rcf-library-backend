@@ -12,8 +12,10 @@ import { sendPush } from '../services/pushService.js'
 import { getBotSettings, cleanBotSettings } from '../services/botSettings.js'
 import { ensureGroupSettingsColumn, cleanGroupSettings, withGroupDefaults } from '../services/groupSettings.js'
 import { ensureChatLogTables, chatLogUsage } from '../services/botChatLog.js'
-import { isWhatsappRequest } from '../services/whatsappRequests.js'
+import { isWhatsappRequest, readyMessage } from '../services/whatsappRequests.js'
 import { ensureReviewColumns } from '../services/appReviews.js'
+import { ensureAiTables, requestLectureNotes, retryJob } from '../services/aiLibrary.js'
+import { notesProvider } from '../services/noteGenerator.js'
 
 const router = Router()
 
@@ -812,20 +814,11 @@ router.patch('/requests/:id', async (req, res) => {
   const { user_id: requesterId, title: requestTitle, details } = result.rows[0]
   if (!requesterId) {
     if (isWhatsappRequest(details)) {
-      const site = (process.env.PUBLIC_SITE_URL || 'https://rcf-mouau-library.vercel.app').replace(/\/$/, '')
       const name = details.whatsappName ? ` ${details.whatsappName.split(' ')[0]}` : ''
-      // Many ask for the file to be sent "raw" in the chat. Instead: it's at
-      // the link, and once downloaded in the app it reads offline with no data.
-      // Warm, never a refusal: the link is presented as the better deal for them.
-      const rawNote =
-        `\n\n📥 Tap the link, sign in and hit download. It saves right inside the app, so you can read it anytime, even offline with zero data, and it won't eat your phone storage or get lost in chats.` +
-        `\n📴 Try it: once it's downloaded, switch off your data and open the app. It'll be waiting for you in Downloads.` +
-        `\n🤝 We share books through the app rather than as loose files so they stay safe and free for every RCFite, and the people who upload them keep sharing. If anything gives you trouble, just reply here and I'll walk you through it.`
+      // Warm, never a refusal (see readyMessage in whatsappRequests.js).
       const text =
         status === 'fulfilled'
-          ? linked
-            ? `Good news${name}! 🎉 Remember you asked for "${requestTitle}"? It's now in the library:\n👉 ${site}/library/${linked.id}${rawNote}`
-            : `Good news${name}! 🎉 "${requestTitle}", which you asked for, has been added to the library. Search for it here: ${site}/library${rawNote}`
+          ? readyMessage({ whatsappName: details.whatsappName, requestTitle, resourceId: linked?.id, resourceTitle: linked?.title })
           : `Hi${name}, about "${requestTitle}" that you asked for: the library team couldn't add it. Reason: ${declineReason}`
       await query(`INSERT INTO whatsapp_bot_outbox (group_jid, text, created_by) VALUES ($1, $2, $3)`, [details.whatsappId, text, req.user.id]).catch((err) =>
         console.error('WhatsApp request reply failed:', err.message)
@@ -1211,6 +1204,89 @@ router.get('/ratings-summary', async (req, res) => {
   res.json(result.rows[0])
 })
 
+// ---------- AI Library ----------
+// GET /admin/ai-library — jobs (newest first), books the AI wrote, books
+// Bro Paul uploaded, the switches and which AI is writing.
+router.get('/ai-library', async (req, res) => {
+  await ensureAiTables()
+  const [jobs, books, settings, groups] = await Promise.all([
+    query(
+      `SELECT j.id, j.course_code, j.title, j.status, j.progress, j.step, j.error, j.provider, j.requested_by,
+              cardinality(j.request_ids) AS requesters, j.created_at, j.started_at, j.finished_at,
+              j.resource_id, r.title AS resource_title
+       FROM ai_jobs j LEFT JOIN resources r ON r.id = j.resource_id
+       ORDER BY (j.status IN ('queued', 'running')) DESC, j.created_at DESC LIMIT 60`
+    ),
+    query(
+      `SELECT r.id, r.title, r.author, r.course_code, r.status, r.ai_origin, r.thumbnail_url, r.created_at,
+              r.description, r.download_count, t.slug AS type
+       FROM resources r LEFT JOIN resource_types t ON t.id = r.resource_type_id
+       WHERE r.ai_origin IS NOT NULL ORDER BY r.created_at DESC LIMIT 200`
+    ).catch(() =>
+      query(
+        `SELECT r.id, r.title, r.author, r.course_code, r.status, r.ai_origin, r.thumbnail_url, r.created_at, r.description, t.slug AS type
+         FROM resources r LEFT JOIN resource_types t ON t.id = r.resource_type_id
+         WHERE r.ai_origin IS NOT NULL ORDER BY r.created_at DESC LIMIT 200`
+      )
+    ),
+    getBotSettings(),
+    query(`SELECT jid, name, enabled, settings FROM whatsapp_groups WHERE coalesce((settings->>'left')::boolean, false) = false ORDER BY name`).catch(() => ({ rows: [] })),
+  ])
+  const provider = notesProvider()
+  res.json({
+    provider: provider ? { ...provider, paid: provider.name === 'claude' } : null,
+    settings: {
+      aiLectureNotes: settings.aiLectureNotes,
+      aiNotesAutoPublish: settings.aiNotesAutoPublish,
+      askForMaterials: settings.askForMaterials,
+      autoUploadMaterials: settings.autoUploadMaterials,
+      autoPublishUploads: settings.autoPublishUploads,
+    },
+    canEdit: req.user.role === 'superadmin',
+    jobs: jobs.rows,
+    books: books.rows,
+    groups: groups.rows.map((g) => ({ jid: g.jid, name: g.name, enabled: g.enabled, askForMaterials: g.settings?.askForMaterials === true })),
+  })
+})
+
+// POST /admin/ai-library/notes  { courseCode, title, level } — write notes now
+// (even if the library already has some for that course).
+router.post('/ai-library/notes', async (req, res) => {
+  const courseCode = String(req.body.courseCode || '').trim()
+  const title = String(req.body.title || '').trim()
+  if (!courseCode && title.length < 3) return res.status(400).json({ error: 'Give a course code or a course title.' })
+  const result = await requestLectureNotes({
+    courseCode: courseCode || null,
+    title: title || courseCode,
+    level: String(req.body.level || '').trim() || null,
+    requestedBy: `Admin: ${req.user.name || 'admin'}`,
+    force: true,
+  })
+  if (result.status === 'unavailable') return res.status(503).json({ error: 'No AI key is set on the server (GEMINI_API_KEY).' })
+  await logAction(req.user.id, 'ai_notes.create', 'ai_job', result.jobId || '', { courseCode, title })
+  res.status(201).json(result)
+})
+
+// POST /admin/ai-library/jobs/:id/retry — run a failed job again.
+router.post('/ai-library/jobs/:id/retry', async (req, res) => {
+  if (!(await retryJob(req.params.id))) return res.status(404).json({ error: 'Only failed jobs can be retried.' })
+  await logAction(req.user.id, 'ai_notes.retry', 'ai_job', req.params.id)
+  res.json({ ok: true })
+})
+
+// PATCH /admin/ai-library/resources/:id  { status: 'approved' | 'pending' } — publish or hide one.
+router.patch('/ai-library/resources/:id', async (req, res) => {
+  const status = req.body.status === 'approved' ? 'approved' : 'pending'
+  const r = await query(
+    `UPDATE resources SET status = $2::resource_status, reviewed_by = $3, reviewed_at = now()
+     WHERE id = $1 AND ai_origin IS NOT NULL RETURNING id`,
+    [req.params.id, status, req.user.id]
+  )
+  if (!r.rows.length) return res.status(404).json({ error: 'Not found' })
+  await logAction(req.user.id, status === 'approved' ? 'ai_book.publish' : 'ai_book.hide', 'resource', req.params.id)
+  res.json({ ok: true, status })
+})
+
 // GET /admin/reviews?kind=review|complaint&stars=1..5&before=<iso>
 // The reviews page: summary (average, count, 1-5 breakdown, complaints,
 // last-30-days average) plus the newest 50 matching entries.
@@ -1450,7 +1526,7 @@ const ACTIVITY_CATEGORIES = {
   private: ['private'],
   posts: ['morning', 'featured', 'promo', 'new-month', 'welcome', 'intro', 'cleanup'],
   announcements: ['announcement', 'send'],
-  replies: ['reply', 'search', 'chime', 'prayer', 'request'],
+  replies: ['reply', 'search', 'chime', 'prayer', 'request', 'upload'],
   reactions: ['react', 'sticker', 'birthday'],
 }
 

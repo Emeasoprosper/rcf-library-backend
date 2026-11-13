@@ -27,6 +27,9 @@ export const GROUP_SETTING_DEFAULTS = {
   chimeIn: true,
   newMonth: true,
   birthdays: true,
+  // Ask this group for past questions the library doesn't have (and accept
+  // files sent here as library material). Off until an admin picks the group.
+  askForMaterials: false,
 }
 
 const AUDIENCES = ['campus', 'mixed', 'general']
@@ -35,7 +38,7 @@ const PRAYER_MODES = ['quiet', 'amen', 'join']
 // study tip in student groups and leaves it out of 'general' ones.
 // left = Bro Paul was removed from the group (set by the bot, cleared when
 // he's added back).
-const BOOL_KEYS = ['bookOfDay', 'morningPost', 'studyTip', 'promos', 'welcome', 'chimeIn', 'newMonth', 'birthdays', 'revealAi', 'started', 'left']
+const BOOL_KEYS = ['bookOfDay', 'morningPost', 'studyTip', 'promos', 'welcome', 'chimeIn', 'newMonth', 'birthdays', 'revealAi', 'started', 'left', 'askForMaterials']
 
 // Keeps only known keys with sane values.
 export function cleanGroupSettings(input = {}) {

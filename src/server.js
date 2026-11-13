@@ -32,6 +32,7 @@ import announcementMusicRoutes from './routes/announcementMusic.js'
 import readingSpaceRoutes from './routes/readingSpace.js'
 import studyToolsRoutes from './routes/studyTools.js'
 import { startBirthdayEmailLoop } from './services/birthdayEmails.js'
+import { startAiLibrary } from './services/aiLibrary.js'
 import shareLandingRoutes from './routes/shareLanding.js'
 import shareTokenRoutes from './routes/shareToken.js'
 import sitemapRoutes from './routes/sitemap.js'
@@ -235,4 +236,6 @@ app.listen(PORT, () => {
   // then on a timer — never per-request, so this stays flat at 1M users.
   startNewsRefreshLoop()
   startBirthdayEmailLoop()
+  // Picks up AI lecture-note jobs left unfinished by a restart.
+  startAiLibrary()
 })
