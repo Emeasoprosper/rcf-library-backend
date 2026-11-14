@@ -14,7 +14,7 @@ import { ensureGroupSettingsColumn, cleanGroupSettings, withGroupDefaults } from
 import { ensureChatLogTables, chatLogUsage } from '../services/botChatLog.js'
 import { isWhatsappRequest, readyMessage } from '../services/whatsappRequests.js'
 import { ensureReviewColumns } from '../services/appReviews.js'
-import { ensureAiTables, requestLectureNotes, retryJob } from '../services/aiLibrary.js'
+import { ensureAiTables, requestLectureNotes, retryJob, workerStatus } from '../services/aiLibrary.js'
 import { notesProvider } from '../services/noteGenerator.js'
 
 const router = Router()
@@ -1272,6 +1272,7 @@ router.get('/ai-library', async (req, res) => {
   const provider = notesProvider()
   res.json({
     provider: provider ? { ...provider, paid: provider.name === 'claude' } : null,
+    worker: await workerStatus(),
     settings: {
       aiLectureNotes: settings.aiLectureNotes,
       aiNotesAutoPublish: settings.aiNotesAutoPublish,

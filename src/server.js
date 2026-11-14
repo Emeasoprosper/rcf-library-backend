@@ -39,6 +39,7 @@ import sitemapRoutes from './routes/sitemap.js'
 import externalBooksRoutes from './routes/externalBooks.js'
 import collectionLandingRoutes from './routes/collectionLanding.js'
 import botRoutes from './routes/bot.js'
+import aiWorkerRoutes from './routes/aiWorker.js'
 import engagementRoutes from './routes/engagement.js'
 import { startNewsRefreshLoop } from './services/newsService.js'
 import { recordEvent } from './services/systemEvents.js'
@@ -162,8 +163,10 @@ app.use(
   rateLimit({
     windowMs: 15 * 60 * 1000,
     limit: 300,
-    // /api/bot is the WhatsApp bot's heartbeat, already locked by BOT_API_KEY.
-    skip: (req) => req.originalUrl.startsWith('/api/presence') || req.originalUrl.startsWith('/api/bot'),
+    // /api/bot is the WhatsApp bot's heartbeat, already locked by BOT_API_KEY;
+    // /api/ai-worker is the Kaggle notes AI, locked by AI_WORKER_KEY.
+    skip: (req) =>
+      req.originalUrl.startsWith('/api/presence') || req.originalUrl.startsWith('/api/bot') || req.originalUrl.startsWith('/api/ai-worker'),
     standardHeaders: true,
     legacyHeaders: false,
   })
@@ -205,6 +208,8 @@ app.use('/api/reading-space', readingSpaceRoutes)
 app.use('/api/study', studyToolsRoutes)
 app.use('/api/external', externalBooksRoutes)
 app.use('/api/bot', botRoutes)
+// Your own AI on Kaggle writing lecture notes (key-protected).
+app.use('/api/ai-worker', aiWorkerRoutes)
 app.use('/api/engagement', engagementRoutes)
 
 // Centralized error handler — now actually reachable for async route

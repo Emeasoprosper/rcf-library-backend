@@ -20,7 +20,17 @@ import { lookupCourse, analyzeResourceFile } from './aiAnalysis.js'
 import { normalizeCourseCode } from '../utils/courseCode.js'
 import { sendPush } from './pushService.js'
 import { getBotSettings } from './botSettings.js'
-import { draftProgress, generateCourseNotes, notesProvider } from './noteGenerator.js'
+import {
+  TEACHER,
+  chapterPrompt,
+  cleanText,
+  draftProgress,
+  generateCourseNotes,
+  notesProvider,
+  parsePlan,
+  planPrompt,
+  revisionPrompt,
+} from './noteGenerator.js'
 import { renderNotesPdf } from './notesPdf.js'
 import { isWhatsappRequest, readyMessage, SITE_URL } from './whatsappRequests.js'
 import { sendPushToUser } from '../routes/community.js'
@@ -61,6 +71,16 @@ export function ensureAiTables() {
     -- retry_after: waiting for the free AI limit to reset until then
     ALTER TABLE ai_jobs ADD COLUMN IF NOT EXISTS draft JSONB;
     ALTER TABLE ai_jobs ADD COLUMN IF NOT EXISTS retry_after TIMESTAMPTZ;
+    -- claimed_by 'kaggle' = being written by your own AI on Kaggle;
+    -- worker_seen = its last sign of life (a silent worker's job is taken back)
+    ALTER TABLE ai_jobs ADD COLUMN IF NOT EXISTS claimed_by TEXT;
+    ALTER TABLE ai_jobs ADD COLUMN IF NOT EXISTS worker_seen TIMESTAMPTZ;
+    CREATE TABLE IF NOT EXISTS ai_worker_status (
+      id INT PRIMARY KEY DEFAULT 1,
+      last_seen TIMESTAMPTZ,
+      model TEXT,
+      jobs_done INT NOT NULL DEFAULT 0
+    );
   `).catch((err) => {
     ready = null
     throw err
@@ -273,6 +293,25 @@ async function publishNotes(job, notes, pdf) {
   return { resource, published: settings.aiNotesAutoPublish }
 }
 
+// PDF -> library -> requests fulfilled -> admins told. Used by the server's
+// own writer and by the Kaggle worker once its last chapter arrives.
+async function finishNotes(job, notes) {
+  const pdf = await renderNotesPdf(notes)
+  const { resource, published } = await publishNotes(job, notes, pdf)
+  await query(
+    `UPDATE ai_jobs SET status = 'done', progress = 100, step = $2, resource_id = $3, provider = $4, finished_at = now(), draft = NULL, retry_after = NULL WHERE id = $1`,
+    [job.id, published ? 'Published' : 'Waiting for review', resource.id, `${notes.provider}${notes.model ? ` (${notes.model})` : ''}`]
+  )
+  const fulfilled = published ? await fulfilRequests(job.request_ids || [], resource, { aiWritten: true }) : 0
+  await notifyAdmins({
+    type: 'ai_notes',
+    title: `✍️ AI wrote lecture notes: ${resource.title}`,
+    body: `${notes.chapters.length} weeks, ${Math.round(pdf.length / 1024)} KB.${published ? ' Live in the library.' : ' Waiting for your review.'}${fulfilled ? ` Sent to ${fulfilled} ${fulfilled === 1 ? 'person' : 'people'} who asked.` : ''}`,
+    url: '/admin/ai-library',
+  })
+  return resource
+}
+
 async function runJob(job) {
   let lastSave = 0
   const progress = (pct, step) => {
@@ -291,20 +330,8 @@ async function runJob(job) {
         saveDraft: (draft) => query(`UPDATE ai_jobs SET draft = $2 WHERE id = $1`, [job.id, JSON.stringify(draft)]),
       }
     )
-    const pdf = await renderNotesPdf(notes)
     progress(96, 'Publishing to the library')
-    const { resource, published } = await publishNotes(job, notes, pdf)
-    await query(
-      `UPDATE ai_jobs SET status = 'done', progress = 100, step = $2, resource_id = $3, provider = $4, finished_at = now(), draft = NULL, retry_after = NULL WHERE id = $1`,
-      [job.id, published ? 'Published' : 'Waiting for review', resource.id, `${notes.provider}${notes.model ? ` (${notes.model})` : ''}`]
-    )
-    const fulfilled = published ? await fulfilRequests(job.request_ids || [], resource, { aiWritten: true }) : 0
-    await notifyAdmins({
-      type: 'ai_notes',
-      title: `✍️ AI wrote lecture notes: ${resource.title}`,
-      body: `${notes.chapters.length} weeks, ${Math.round(pdf.length / 1024)} KB.${published ? ' Live in the library.' : ' Waiting for your review.'}${fulfilled ? ` Sent to ${fulfilled} ${fulfilled === 1 ? 'person' : 'people'} who asked.` : ''}`,
-      url: '/admin/ai-library',
-    })
+    await finishNotes(job, notes)
   } catch (err) {
     // The free AI limit ran out: not a failure. Keep what's written and
     // carry on automatically once it resets.
@@ -339,9 +366,10 @@ export function kickWorker() {
   working = true
   ;(async () => {
     try {
+      await releaseSilentWorkerJobs()
       for (;;) {
         const next = await query(
-          `UPDATE ai_jobs SET status = 'running', started_at = now(), step = 'Starting', error = NULL
+          `UPDATE ai_jobs SET status = 'running', started_at = now(), step = 'Starting', error = NULL, claimed_by = 'server'
            WHERE id = (SELECT id FROM ai_jobs WHERE status = 'queued' AND (retry_after IS NULL OR retry_after <= now())
                        ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED)
            RETURNING *`
@@ -361,7 +389,7 @@ let ticking = null
 export async function startAiLibrary() {
   try {
     await ensureAiTables()
-    await query(`UPDATE ai_jobs SET status = 'queued' WHERE status = 'running'`)
+    await query(`UPDATE ai_jobs SET status = 'queued' WHERE status = 'running' AND claimed_by IS DISTINCT FROM 'kaggle'`)
     kickWorker()
     // Picks up jobs that were waiting for the AI limit to reset.
     ticking ||= setInterval(kickWorker, 10 * 60 * 1000)
@@ -380,6 +408,139 @@ export async function retryJob(id) {
   )
   if (r.rows.length) kickWorker()
   return r.rows.length > 0
+}
+
+// ---------- Your own AI on Kaggle (the "worker") ----------
+// The notebook only runs the model. The server tells it what to write next
+// (plan -> each week -> revision), keeps the draft, and makes the PDF, so
+// the notebook never needs updating when the notes change.
+
+// A Kaggle job with no sign of life for 15 minutes (notebook stopped) goes
+// back to the queue, keeping everything written so far.
+export async function releaseSilentWorkerJobs() {
+  await query(
+    `UPDATE ai_jobs SET status = 'queued', claimed_by = NULL, step = 'Your Kaggle AI stopped; continuing here'
+     WHERE status = 'running' AND claimed_by = 'kaggle' AND worker_seen < now() - interval '15 minutes'`
+  ).catch(() => {})
+}
+
+export async function workerHeartbeat(model) {
+  await ensureAiTables()
+  await query(
+    `INSERT INTO ai_worker_status (id, last_seen, model) VALUES (1, now(), $1)
+     ON CONFLICT (id) DO UPDATE SET last_seen = now(), model = COALESCE($1, ai_worker_status.model)`,
+    [model ? String(model).slice(0, 80) : null]
+  )
+}
+
+export async function workerStatus() {
+  await ensureAiTables()
+  const r = await query(`SELECT last_seen, model, jobs_done FROM ai_worker_status WHERE id = 1`)
+  const row = r.rows[0]
+  return {
+    online: Boolean(row?.last_seen && Date.now() - new Date(row.last_seen).getTime() < 3 * 60 * 1000),
+    lastSeen: row?.last_seen || null,
+    model: row?.model || null,
+    jobsDone: row?.jobs_done || 0,
+  }
+}
+
+function taskFor(job, draft) {
+  const course = { courseCode: job.course_code, title: job.title, level: job.level, department: job.department }
+  if (!draft?.plan) {
+    return { kind: 'plan', system: TEACHER, prompt: planPrompt(course), maxTokens: 6000 }
+  }
+  const plan = draft.plan
+  const chapters = draft.chapters || []
+  const week = plan.schemeOfWork.find((w) => !chapters.some((c) => c.week === w.week))
+  if (week) return { kind: 'chapter', week: week.week, system: TEACHER, prompt: chapterPrompt(plan, week), maxTokens: 12000 }
+  if (!draft.revision) return { kind: 'revision', system: TEACHER, prompt: revisionPrompt(plan), maxTokens: 12000 }
+  return null
+}
+
+function progressFor(draft) {
+  const weeks = draft?.plan?.schemeOfWork?.length || 0
+  const written = draft?.chapters?.length || 0
+  if (!draft?.plan) return [3, 'Your Kaggle AI is planning the course']
+  if (written < weeks) return [10 + Math.round((written / (weeks + 1)) * 80), `Your Kaggle AI is writing week ${written + 1} of ${weeks}`]
+  return [88, 'Your Kaggle AI is writing the revision chapter']
+}
+
+// Hands the worker the oldest waiting job (including ones paused by the
+// free Gemini/Groq limits) and its first step. null = nothing to do.
+export async function workerClaim(model) {
+  await ensureAiTables()
+  await workerHeartbeat(model)
+  await releaseSilentWorkerJobs()
+  const r = await query(
+    `UPDATE ai_jobs SET status = 'running', claimed_by = 'kaggle', worker_seen = now(), retry_after = NULL, error = NULL,
+            started_at = COALESCE(started_at, now())
+     WHERE id = (SELECT id FROM ai_jobs WHERE status = 'queued' ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED)
+     RETURNING *`
+  )
+  const job = r.rows[0]
+  if (!job) return null
+  const course = job.course_code ? await lookupCourse(job.course_code) : {}
+  const info = { ...job, title: job.title || course.title, level: job.level || course.level, department: course.departmentName }
+  const [progress, step] = progressFor(job.draft)
+  await query(`UPDATE ai_jobs SET progress = $2, step = $3 WHERE id = $1`, [job.id, progress, step])
+  return { jobId: job.id, title: [job.course_code, info.title].filter(Boolean).join(' – '), task: taskFor(info, job.draft) }
+}
+
+// The worker's answer to one step. Saves it, then returns the next step, or
+// { done: true } after publishing.
+export async function workerAnswer(jobId, { kind, week, text, model }) {
+  const r = await query(`SELECT * FROM ai_jobs WHERE id = $1 AND status = 'running' AND claimed_by = 'kaggle'`, [jobId])
+  const job = r.rows[0]
+  if (!job) throw Object.assign(new Error('This job is no longer assigned to your Kaggle AI'), { status: 409 })
+  const draft = job.draft || {}
+  const clean = cleanText(text)
+  if (!clean) throw Object.assign(new Error('Empty answer'), { status: 400 })
+
+  if (kind === 'plan') {
+    const course = job.course_code ? await lookupCourse(job.course_code) : {}
+    draft.plan = parsePlan(clean, { courseCode: job.course_code, title: job.title || course.title, level: job.level || course.level })
+    draft.chapters = []
+  } else if (kind === 'chapter') {
+    const w = draft.plan?.schemeOfWork?.find((x) => x.week === Number(week))
+    if (!w) throw Object.assign(new Error('Unknown week'), { status: 400 })
+    draft.chapters = [...(draft.chapters || []).filter((c) => c.week !== w.week), { ...w, markdown: clean }]
+  } else if (kind === 'revision') {
+    draft.revision = clean
+  } else {
+    throw Object.assign(new Error('Unknown step'), { status: 400 })
+  }
+  draft.writers = [...new Set([...(draft.writers || []), `kaggle/${model || 'own-model'}`])]
+
+  const [progress, step] = progressFor(draft)
+  await query(`UPDATE ai_jobs SET draft = $2, progress = $3, step = $4, worker_seen = now() WHERE id = $1`, [jobId, JSON.stringify(draft), progress, step])
+  await workerHeartbeat(model)
+
+  const course = job.course_code ? await lookupCourse(job.course_code) : {}
+  const next = taskFor({ ...job, title: job.title || course.title, level: job.level || course.level, department: course.departmentName }, draft)
+  if (next) return { next }
+
+  // All written: make the PDF and publish (same as the server's own writer).
+  await query(`UPDATE ai_jobs SET progress = 96, step = 'Publishing to the library' WHERE id = $1`, [jobId])
+  const notes = {
+    ...draft.plan,
+    chapters: [...draft.chapters].sort((a, b) => a.week - b.week),
+    revision: draft.revision,
+    provider: 'kaggle',
+    model: draft.writers.join(' + '),
+  }
+  const resource = await finishNotes(job, notes)
+  await query(`UPDATE ai_worker_status SET jobs_done = jobs_done + 1 WHERE id = 1`).catch(() => {})
+  return { done: true, resourceId: resource.id, title: resource.title }
+}
+
+// The worker hit a problem with this job: back to the queue, keeping the draft.
+export async function workerRelease(jobId, error) {
+  await query(
+    `UPDATE ai_jobs SET status = 'queued', claimed_by = NULL, step = $2
+     WHERE id = $1 AND status = 'running' AND claimed_by = 'kaggle'`,
+    [jobId, `Your Kaggle AI stopped on this one (${String(error || 'unknown').slice(0, 120)}); it will be picked up again`]
+  )
 }
 
 // ---------- Bro Paul uploads ----------

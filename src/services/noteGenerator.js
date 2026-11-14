@@ -26,9 +26,19 @@ const GEMINI_CANDIDATES = [
 ].filter((m, i, all) => m && all.indexOf(m) === i)
 const CLAUDE_MODEL = process.env.NOTES_CLAUDE_MODEL || 'claude-opus-5-5'
 
+// Free backup when Gemini's free limit runs out: Groq (open models, its own
+// free daily allowance). Strongest first; override with NOTES_GROQ_MODELS.
+const GROQ_API_KEY = process.env.GROQ_API_KEY
+const GROQ_MODELS = (process.env.NOTES_GROQ_MODELS || 'openai/gpt-oss-120b,llama-3.3-70b-versatile,openai/gpt-oss-20b')
+  .split(',')
+  .map((m) => m.trim())
+  .filter(Boolean)
+
 export function notesProvider() {
-  if (process.env.ANTHROPIC_API_KEY) return { name: 'claude', model: CLAUDE_MODEL }
-  if (GEMINI_API_KEY) return { name: 'gemini', model: workingGemini.default || GEMINI_CANDIDATES[0] }
+  const backups = GROQ_API_KEY ? ['groq'] : []
+  if (process.env.ANTHROPIC_API_KEY) return { name: 'claude', model: CLAUDE_MODEL, backups: [] }
+  if (GEMINI_API_KEY) return { name: 'gemini', model: workingGemini.default || GEMINI_CANDIDATES[0], backups }
+  if (GROQ_API_KEY) return { name: 'groq', model: GROQ_MODELS[0], backups: [] }
   return null
 }
 
@@ -155,14 +165,96 @@ async function askClaude({ system, prompt, search, maxTokens }) {
   throw new Error('Claude kept pausing; gave up')
 }
 
-function ask(opts) {
+// ---------- Groq (free backup) ----------
+// OpenAI-compatible chat API. No web search, so the research step relies on
+// what the model already knows about the course.
+async function groqOnce(model, { system, prompt, maxTokens }) {
+  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${GROQ_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: prompt },
+      ],
+      // The free plan allows ~8K tokens a minute: keep each answer inside that.
+      max_completion_tokens: Math.min(maxTokens, 6500),
+      temperature: 0.4,
+      ...(model.startsWith('openai/gpt-oss') ? { reasoning_effort: 'low' } : {}),
+    }),
+    signal: AbortSignal.timeout(240000),
+  })
+  if (!res.ok) {
+    const body = await res.text()
+    const err = new Error(`Groq ${model} ${res.status}: ${body.slice(0, 200)}`)
+    err.status = res.status
+    err.body = body
+    err.retryAfter = Number(res.headers.get('retry-after')) || 0
+    throw err
+  }
+  const data = await res.json()
+  const text = String(data.choices?.[0]?.message?.content || '').trim()
+  if (!text) throw Object.assign(new Error(`Groq ${model} returned no text`), { status: 502 })
+  return text
+}
+
+async function askGroq(opts) {
+  const order = GROQ_MODELS.filter((m) => (unusable.get(`groq:${m}`) || 0) < Date.now())
+  let lastErr
+  let quotaOnly = true
+  for (const model of order) {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      try {
+        return { text: await groqOnce(model, opts), model: `groq/${model}` }
+      } catch (err) {
+        lastErr = err
+        if (err.status === 429) {
+          // Per-day allowance used up: this model is done for a while.
+          if (/per day|TPD|RPD|daily/i.test(err.body || '')) { unusable.set(`groq:${model}`, Date.now() + 3 * HOUR); break }
+          // Per-minute: wait as long as Groq says (capped), then retry.
+          if (attempt < 3) { await sleep(Math.min(Math.max(err.retryAfter, 20), 90) * 1000); continue }
+          break
+        }
+        quotaOnly = false
+        if (err.status >= 500) { await sleep(10000); continue }
+        // 413 (too large for the free minute) / 400 / 404: try the next model.
+        if (err.status === 404) unusable.set(`groq:${model}`, Date.now() + 24 * HOUR)
+        break
+      }
+    }
+  }
+  if (quotaOnly && lastErr) throw new QuotaError('The free Groq limit is used up for now')
+  throw lastErr || new QuotaError('No Groq model is available right now')
+}
+
+// Claude (if a key is set) > free Gemini > free Groq backup. When every free
+// service is out for now, a QuotaError makes the job pause and resume later.
+// Which models wrote the current pack (shown on the admin page).
+let writers = new Set()
+
+async function ask(opts) {
+  const result = await askAny(opts)
+  writers.add(result.model)
+  return result
+}
+
+async function askAny(opts) {
   const provider = notesProvider()
-  if (!provider) throw new Error('No AI key configured (set GEMINI_API_KEY, or ANTHROPIC_API_KEY for Claude)')
-  return provider.name === 'claude' ? askClaude(opts) : askGemini(opts)
+  if (!provider) throw new Error('No AI key configured (set GEMINI_API_KEY or GROQ_API_KEY, or ANTHROPIC_API_KEY for Claude)')
+  if (provider.name === 'claude') return askClaude(opts)
+  if (provider.name === 'groq') return askGroq(opts)
+  try {
+    return await askGemini(opts)
+  } catch (err) {
+    if (err.code !== 'QUOTA' || !GROQ_API_KEY) throw err
+    console.warn('Gemini free limit reached; writing with the Groq backup.')
+    return askGroq(opts)
+  }
 }
 
 // ---------- Prompts ----------
-const TEACHER = `You are an experienced lecturer at a Nigerian university and an outstanding teacher. You write lecture notes for undergraduates at Michael Okpara University of Agriculture, Umudike (MOUAU), following the NUC CCMAS curriculum.
+export const TEACHER = `You are an experienced lecturer at a Nigerian university and an outstanding teacher. You write lecture notes for undergraduates at Michael Okpara University of Agriculture, Umudike (MOUAU), following the NUC CCMAS curriculum.
 
 Your notes must be:
 - Accurate and complete: cover the topic as a good lecturer would over a full week of classes.
@@ -175,7 +267,7 @@ Formatting rules (the notes are printed as a PDF, so follow them exactly):
 - No emojis. Do not include links or citation markers like [1].
 - Start directly with the content. No greetings, no "Sure, here are…", no closing remarks.`
 
-function cleanText(s) {
+export function cleanText(s) {
   return String(s || '')
     .replace(/\[\d+(?:,\s*\d+)*\]/g, '') // citation markers
     .replace(/\$\$?([^$]+)\$\$?/g, '$1') // stray LaTeX delimiters
@@ -190,9 +282,9 @@ function parseJsonBlock(text) {
   return JSON.parse(raw)
 }
 
-async function planCourse({ courseCode, title, level, department }) {
+export function planPrompt({ courseCode, title, level, department }) {
   const what = [courseCode, title].filter(Boolean).join(' – ')
-  const prompt = `Research the university course "${what}"${level ? ` (${level} level)` : ''}${department ? ` in the Department of ${department}` : ''} as taught in Nigerian universities (MOUAU first, then the NUC CCMAS course content, then other Nigerian universities' course outlines).
+  return `Research the university course "${what}"${level ? ` (${level} level)` : ''}${department ? ` in the Department of ${department}` : ''} as taught in Nigerian universities (MOUAU first, then the NUC CCMAS course content, then other Nigerian universities' course outlines).
 
 Then plan comprehensive lecture notes for it. Reply with ONE JSON object in a \`\`\`json block, nothing else:
 {
@@ -208,7 +300,15 @@ Then plan comprehensive lecture notes for it. Reply with ONE JSON object in a \`
   "references": ["5-8 standard textbooks: Author (Year). Title. Publisher."]
 }
 The scheme of work must have 12 to 14 weeks covering the whole syllabus in teaching order, with no revision or exam weeks.`
-  const { text, model } = await ask({ system: TEACHER, prompt, search: true, maxTokens: 6000 })
+}
+
+async function planCourse(input) {
+  const { text, model } = await ask({ system: TEACHER, prompt: planPrompt(input), search: true, maxTokens: 6000 })
+  return { ...parsePlan(text, input), model }
+}
+
+// Turns the AI's plan reply into a clean plan (throws if unusable).
+export function parsePlan(text, { courseCode, title, level } = {}) {
   const plan = parseJsonBlock(text)
   const weeks = (Array.isArray(plan.schemeOfWork) ? plan.schemeOfWork : [])
     .filter((w) => w && w.topic)
@@ -224,13 +324,12 @@ The scheme of work must have 12 to 14 weeks covering the whole syllabus in teach
     objectives: (plan.objectives || []).map(cleanText).filter(Boolean).slice(0, 10),
     schemeOfWork: weeks,
     references: (plan.references || []).map(cleanText).filter(Boolean).slice(0, 10),
-    model,
   }
 }
 
-async function writeChapter(plan, week) {
+export function chapterPrompt(plan, week) {
   const outline = plan.schemeOfWork.map((w) => `Week ${w.week}: ${w.topic}`).join('\n')
-  const prompt = `Course: ${plan.courseCode} ${plan.courseTitle}${plan.level ? ` (${plan.level} level)` : ''}
+  return `Course: ${plan.courseCode} ${plan.courseTitle}${plan.level ? ` (${plan.level} level)` : ''}
 Full scheme of work (for context, so you don't repeat other weeks):
 ${outline}
 
@@ -251,13 +350,16 @@ Then one ### section per subtopic, each with clear explanations, definitions in 
 (short, clear model answers or solution steps)
 
 Aim for about 2,000-3,000 words. Do not include the week title as a heading; it is added for you.`
-  const { text } = await ask({ system: TEACHER, prompt, search: false, maxTokens: 12000 })
+}
+
+async function writeChapter(plan, week) {
+  const { text } = await ask({ system: TEACHER, prompt: chapterPrompt(plan, week), search: false, maxTokens: 12000 })
   return cleanText(text)
 }
 
-async function writeRevision(plan) {
+export function revisionPrompt(plan) {
   const outline = plan.schemeOfWork.map((w) => `Week ${w.week}: ${w.topic} (${w.subtopics.join(', ')})`).join('\n')
-  const prompt = `Course: ${plan.courseCode} ${plan.courseTitle}
+  return `Course: ${plan.courseCode} ${plan.courseTitle}
 Topics covered:
 ${outline}
 
@@ -272,7 +374,10 @@ Write the final revision chapter for these lecture notes:
 (concise answers or solution outlines for every question)
 ### Study tips for this course
 (5-8 practical tips)`
-  const { text } = await ask({ system: TEACHER, prompt, search: false, maxTokens: 12000 })
+}
+
+async function writeRevision(plan) {
+  const { text } = await ask({ system: TEACHER, prompt: revisionPrompt(plan), search: false, maxTokens: 12000 })
   return cleanText(text)
 }
 
@@ -282,6 +387,7 @@ Write the final revision chapter for these lecture notes:
 // where it left off instead of starting again.
 export async function generateCourseNotes({ courseCode, title, level, department }, onProgress = () => {}, { draft = null, saveDraft = async () => {} } = {}) {
   const provider = notesProvider()
+  writers = new Set()
   let plan = draft?.plan
   if (!plan) {
     onProgress(3, `Researching the course (${provider?.name || 'no AI'})`)
@@ -297,7 +403,7 @@ export async function generateCourseNotes({ courseCode, title, level, department
     onProgress(10 + Math.round((chapters.length / total) * 80), `Writing week ${week.week} of ${plan.schemeOfWork.length}: ${week.topic}`)
     chapters.push({ ...week, markdown: await writeChapter(plan, week) })
     await saveDraft({ plan, chapters })
-    if (provider?.name === 'gemini') await sleep(4000) // stay inside free-tier per-minute limits
+    if (provider?.name !== 'claude') await sleep(4000) // stay inside free-tier per-minute limits
   }
   let revision = draft?.revision
   if (!revision) {
@@ -307,7 +413,8 @@ export async function generateCourseNotes({ courseCode, title, level, department
   }
   onProgress(92, 'Laying out the PDF')
   chapters.sort((a, b) => a.week - b.week)
-  return { ...plan, chapters, revision, provider: provider?.name, model: workingGemini.default || plan.model }
+  const used = [...writers].join(' + ')
+  return { ...plan, chapters, revision, provider: provider?.name, model: used || workingGemini.default || plan.model }
 }
 
 // How far a saved draft got, for "3 of 13 weeks written".
