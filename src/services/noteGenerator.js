@@ -11,7 +11,9 @@
 // otherwise Gemini's free tier, trying the strongest model that answers.
 import Anthropic from '@anthropic-ai/sdk'
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY
+// NOTES_GEMINI_API_KEY lets notes use their own key (e.g. one with billing
+// on) so they don't share the free quota with Bro Paul's chatting.
+const GEMINI_API_KEY = process.env.NOTES_GEMINI_API_KEY || process.env.GEMINI_API_KEY
 // Strongest first. Models that don't exist (or aren't free) for this key are
 // skipped automatically, and the one that worked is remembered.
 const GEMINI_CANDIDATES = [
@@ -51,8 +53,10 @@ async function geminiOnce(model, { system, prompt, search, maxTokens }) {
     }
   )
   if (!res.ok) {
-    const err = new Error(`Gemini ${model} ${res.status}: ${(await res.text()).slice(0, 200)}`)
+    const body = await res.text()
+    const err = new Error(`Gemini ${model} ${res.status}: ${body.slice(0, 200)}`)
     err.status = res.status
+    err.body = body // full text: says which quota (per minute / per day / none)
     throw err
   }
   const data = await res.json()
@@ -61,28 +65,61 @@ async function geminiOnce(model, { system, prompt, search, maxTokens }) {
   return text
 }
 
+// Models this key can't use for a while: model -> until (ms).
+//  - no free quota at all for it ("limit: 0") or not found: skip for a day
+//  - today's quota used up ("PerDay"): skip for a few hours
+const unusable = new Map()
+const HOUR = 60 * 60 * 1000
+
+// What a Gemini 429 means: 'none' (no free quota for this model), 'daily'
+// (today's quota used up) or 'minute' (too fast; wait a little).
+function quotaKind(err) {
+  const msg = String(err.body || err.message || '')
+  if (/limit:\s*0\b|free_tier[^"]*"\s*,?\s*"?quotaValue"?:\s*"?0/i.test(msg)) return 'none'
+  if (/PerDay|per day|daily/i.test(msg)) return 'daily'
+  return 'minute'
+}
+
+export class QuotaError extends Error {
+  constructor(message) {
+    super(message)
+    this.code = 'QUOTA'
+  }
+}
+
 async function askGemini(opts) {
   const slot = opts.search ? 'search' : 'default'
-  const order = workingGemini[slot] ? [workingGemini[slot], ...GEMINI_CANDIDATES.filter((m) => m !== workingGemini[slot])] : GEMINI_CANDIDATES
+  const order = (workingGemini[slot] ? [workingGemini[slot], ...GEMINI_CANDIDATES.filter((m) => m !== workingGemini[slot])] : GEMINI_CANDIDATES)
+    .filter((m) => (unusable.get(m) || 0) < Date.now())
   let lastErr
+  let quotaOnly = true
   for (const model of order) {
-    // Free-tier limits: back off and retry the same model a few times first.
+    let search = opts.search
     for (let attempt = 0; attempt < 4; attempt += 1) {
       try {
-        const text = await geminiOnce(model, opts)
+        const text = await geminiOnce(model, { ...opts, search })
         workingGemini[slot] = model
         return { text, model }
       } catch (err) {
         lastErr = err
-        if (err.status === 429 || err.status >= 500) {
-          await sleep([20000, 45000, 90000, 150000][attempt])
-          continue
+        if (err.status === 429) {
+          const kind = quotaKind(err)
+          if (kind === 'none') { unusable.set(model, Date.now() + 24 * HOUR); break }
+          if (kind === 'daily') { unusable.set(model, Date.now() + 3 * HOUR); break }
+          if (attempt < 2) { await sleep([20000, 45000][attempt]); continue } // per-minute limit
+          break
         }
-        break // 400/403/404: this model isn't usable for this key, try the next one
+        quotaOnly = false
+        if (err.status >= 500) { await sleep(10000); continue }
+        // Google Search not allowed for this model/key: same request without it.
+        if (search && err.status === 400) { search = false; continue }
+        if (err.status === 404) unusable.set(model, Date.now() + 24 * HOUR)
+        break
       }
     }
   }
-  throw lastErr || new Error('No Gemini model answered')
+  if (quotaOnly && lastErr) throw new QuotaError('The free Gemini limit is used up for now')
+  throw lastErr || new QuotaError('No Gemini model is available right now')
 }
 
 // ---------- Claude ----------
@@ -240,21 +277,41 @@ Write the final revision chapter for these lecture notes:
 }
 
 // onProgress(percent, stepText) is called as each stage finishes.
-export async function generateCourseNotes({ courseCode, title, level, department }, onProgress = () => {}) {
+// draft / saveDraft: the plan and finished chapters are saved as they're
+// written, so a job stopped by the free AI limit (or a restart) carries on
+// where it left off instead of starting again.
+export async function generateCourseNotes({ courseCode, title, level, department }, onProgress = () => {}, { draft = null, saveDraft = async () => {} } = {}) {
   const provider = notesProvider()
-  onProgress(3, `Researching the course (${provider?.name || 'no AI'})`)
-  const plan = await planCourse({ courseCode, title, level, department })
-  onProgress(10, `Planned ${plan.schemeOfWork.length} weeks`)
-
-  const chapters = []
+  let plan = draft?.plan
+  if (!plan) {
+    onProgress(3, `Researching the course (${provider?.name || 'no AI'})`)
+    plan = await planCourse({ courseCode, title, level, department })
+    await saveDraft({ plan, chapters: [] })
+  }
+  const chapters = Array.isArray(draft?.chapters) ? [...draft.chapters] : []
   const total = plan.schemeOfWork.length + 1
+  onProgress(10 + Math.round((chapters.length / total) * 80), chapters.length ? `Resuming: ${chapters.length} of ${plan.schemeOfWork.length} weeks already written` : `Planned ${plan.schemeOfWork.length} weeks`)
+
   for (const week of plan.schemeOfWork) {
-    onProgress(10 + Math.round((chapters.length / total) * 80), `Writing week ${week.week}: ${week.topic}`)
+    if (chapters.some((c) => c.week === week.week)) continue
+    onProgress(10 + Math.round((chapters.length / total) * 80), `Writing week ${week.week} of ${plan.schemeOfWork.length}: ${week.topic}`)
     chapters.push({ ...week, markdown: await writeChapter(plan, week) })
+    await saveDraft({ plan, chapters })
     if (provider?.name === 'gemini') await sleep(4000) // stay inside free-tier per-minute limits
   }
-  onProgress(88, 'Writing the revision chapter')
-  const revision = await writeRevision(plan)
+  let revision = draft?.revision
+  if (!revision) {
+    onProgress(88, 'Writing the revision chapter')
+    revision = await writeRevision(plan)
+    await saveDraft({ plan, chapters, revision })
+  }
   onProgress(92, 'Laying out the PDF')
+  chapters.sort((a, b) => a.week - b.week)
   return { ...plan, chapters, revision, provider: provider?.name, model: workingGemini.default || plan.model }
+}
+
+// How far a saved draft got, for "3 of 13 weeks written".
+export function draftProgress(draft) {
+  const weeks = draft?.plan?.schemeOfWork?.length || 0
+  return { weeks, written: Array.isArray(draft?.chapters) ? draft.chapters.length : 0 }
 }

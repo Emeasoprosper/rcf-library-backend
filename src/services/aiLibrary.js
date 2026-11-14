@@ -20,7 +20,7 @@ import { lookupCourse, analyzeResourceFile } from './aiAnalysis.js'
 import { normalizeCourseCode } from '../utils/courseCode.js'
 import { sendPush } from './pushService.js'
 import { getBotSettings } from './botSettings.js'
-import { generateCourseNotes, notesProvider } from './noteGenerator.js'
+import { draftProgress, generateCourseNotes, notesProvider } from './noteGenerator.js'
 import { renderNotesPdf } from './notesPdf.js'
 import { isWhatsappRequest, readyMessage, SITE_URL } from './whatsappRequests.js'
 import { sendPushToUser } from '../routes/community.js'
@@ -57,6 +57,10 @@ export function ensureAiTables() {
       finished_at   TIMESTAMPTZ
     );
     CREATE INDEX IF NOT EXISTS idx_ai_jobs_status ON ai_jobs (status, created_at);
+    -- draft: the plan + chapters written so far (resume after a pause)
+    -- retry_after: waiting for the free AI limit to reset until then
+    ALTER TABLE ai_jobs ADD COLUMN IF NOT EXISTS draft JSONB;
+    ALTER TABLE ai_jobs ADD COLUMN IF NOT EXISTS retry_after TIMESTAMPTZ;
   `).catch((err) => {
     ready = null
     throw err
@@ -187,11 +191,23 @@ export async function requestLectureNotes({ courseCode, title, level, requestIds
   if (!notesProvider()) return { status: 'unavailable' }
 
   const code = normalizeCourseCode(courseCode)
-  const cleanTitle = String(title || '')
+  let cleanTitle = String(title || '')
     .replace(LECTURE_NOTES_RE, '')
-    .replace(/\b(please|pls|for|on|the|i need|need)\b/gi, ' ')
+    // "ELEMENTS OF GOVERNMENT UNIT (2)" / "UNIT(3)" / "3 units": not part of the title
+    .replace(/\(?\b\d+\s*units?\b\)?|\bunits?\s*\(?\s*\d+\s*\)?/gi, ' ')
+    // the course code itself, when it's in the title too
+    .replace(/\b[A-Za-z]{3}\s?-?\d{3}\b/g, ' ')
+    .replace(/\b(please|pls|i need|need)\b/gi, ' ')
+    .replace(/[\s,;:–-]+$/g, '')
     .replace(/\s+/g, ' ')
     .trim()
+  // ALL CAPS course lists read better in title case.
+  if (cleanTitle && cleanTitle === cleanTitle.toUpperCase()) {
+    cleanTitle = cleanTitle.toLowerCase().replace(/\b([a-z])([a-z]*)/g, (w, a, b) =>
+      /^(of|and|to|in|for|the|on|a|an)$/.test(w) ? w : a.toUpperCase() + b
+    )
+    cleanTitle = cleanTitle.charAt(0).toUpperCase() + cleanTitle.slice(1)
+  }
   if (!code && cleanTitle.length < 3) return { status: 'unavailable' }
 
   if (!force) {
@@ -269,13 +285,17 @@ async function runJob(job) {
     const course = job.course_code ? await lookupCourse(job.course_code) : {}
     const notes = await generateCourseNotes(
       { courseCode: job.course_code, title: job.title || course.title, level: job.level || course.level, department: course.departmentName },
-      progress
+      progress,
+      {
+        draft: job.draft,
+        saveDraft: (draft) => query(`UPDATE ai_jobs SET draft = $2 WHERE id = $1`, [job.id, JSON.stringify(draft)]),
+      }
     )
     const pdf = await renderNotesPdf(notes)
     progress(96, 'Publishing to the library')
     const { resource, published } = await publishNotes(job, notes, pdf)
     await query(
-      `UPDATE ai_jobs SET status = 'done', progress = 100, step = $2, resource_id = $3, provider = $4, finished_at = now() WHERE id = $1`,
+      `UPDATE ai_jobs SET status = 'done', progress = 100, step = $2, resource_id = $3, provider = $4, finished_at = now(), draft = NULL, retry_after = NULL WHERE id = $1`,
       [job.id, published ? 'Published' : 'Waiting for review', resource.id, `${notes.provider}${notes.model ? ` (${notes.model})` : ''}`]
     )
     const fulfilled = published ? await fulfilRequests(job.request_ids || [], resource, { aiWritten: true }) : 0
@@ -286,6 +306,20 @@ async function runJob(job) {
       url: '/admin/ai-library',
     })
   } catch (err) {
+    // The free AI limit ran out: not a failure. Keep what's written and
+    // carry on automatically once it resets.
+    if (err.code === 'QUOTA') {
+      const saved = await query(`SELECT draft FROM ai_jobs WHERE id = $1`, [job.id]).catch(() => ({ rows: [] }))
+      const { weeks, written } = draftProgress(saved.rows[0]?.draft)
+      const done = weeks ? ` ${written} of ${weeks} weeks written so far.` : ''
+      await query(
+        `UPDATE ai_jobs SET status = 'queued', retry_after = now() + interval '1 hour', error = NULL,
+                step = $2 WHERE id = $1`,
+        [job.id, `Waiting for the free AI limit to reset; continues by itself every hour.${done}`]
+      )
+      console.warn(`AI notes job ${job.id} paused: free AI limit reached.${done}`)
+      return
+    }
     console.error(`AI notes job ${job.id} failed:`, err.message)
     await query(`UPDATE ai_jobs SET status = 'failed', error = $2, finished_at = now() WHERE id = $1`, [job.id, String(err.message).slice(0, 500)])
     await notifyAdmins({
@@ -308,7 +342,8 @@ export function kickWorker() {
       for (;;) {
         const next = await query(
           `UPDATE ai_jobs SET status = 'running', started_at = now(), step = 'Starting', error = NULL
-           WHERE id = (SELECT id FROM ai_jobs WHERE status = 'queued' ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED)
+           WHERE id = (SELECT id FROM ai_jobs WHERE status = 'queued' AND (retry_after IS NULL OR retry_after <= now())
+                       ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED)
            RETURNING *`
         )
         if (!next.rows.length) break
@@ -322,19 +357,27 @@ export function kickWorker() {
   })()
 }
 
+let ticking = null
 export async function startAiLibrary() {
   try {
     await ensureAiTables()
     await query(`UPDATE ai_jobs SET status = 'queued' WHERE status = 'running'`)
     kickWorker()
+    // Picks up jobs that were waiting for the AI limit to reset.
+    ticking ||= setInterval(kickWorker, 10 * 60 * 1000)
   } catch (err) {
     console.error('AI library start failed:', err.message)
   }
 }
 
+// Failed, or waiting for the limit: try again right now (keeps what's written).
 export async function retryJob(id) {
   await ensureAiTables()
-  const r = await query(`UPDATE ai_jobs SET status = 'queued', progress = 0, step = NULL, error = NULL WHERE id = $1 AND status = 'failed' RETURNING id`, [id])
+  const r = await query(
+    `UPDATE ai_jobs SET status = 'queued', step = NULL, error = NULL, retry_after = NULL
+     WHERE id = $1 AND (status = 'failed' OR (status = 'queued' AND retry_after IS NOT NULL)) RETURNING id`,
+    [id]
+  )
   if (r.rows.length) kickWorker()
   return r.rows.length > 0
 }

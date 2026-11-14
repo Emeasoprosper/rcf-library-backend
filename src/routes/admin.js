@@ -759,7 +759,7 @@ router.get('/requests', async (req, res) => {
   const jobs = allIds.length
     ? (
         await query(
-          `SELECT DISTINCT ON (rid) rid, j.id, j.status, j.progress, j.step, j.error, j.resource_id, j.created_at
+          `SELECT DISTINCT ON (rid) rid, j.id, j.status, j.progress, j.step, j.error, j.resource_id, j.created_at, j.retry_after
            FROM ai_jobs j, unnest(j.request_ids) AS rid
            WHERE rid = ANY($1::uuid[])
            ORDER BY rid, j.created_at DESC`,
@@ -771,7 +771,7 @@ router.get('/requests', async (req, res) => {
     const found = jobs.filter((j) => memberIds.includes(j.rid))
     if (!found.length) return null
     const j = found.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0]
-    return { id: j.id, status: j.status, progress: j.progress, step: j.step, error: j.error, resourceId: j.resource_id }
+    return { id: j.id, status: j.status, progress: j.progress, step: j.step, error: j.error, resourceId: j.resource_id, waiting: Boolean(j.retry_after) }
   }
 
   const items = Array.from(groups.values()).map((g) => ({
@@ -1249,7 +1249,7 @@ router.get('/ai-library', async (req, res) => {
   const [jobs, books, settings, groups] = await Promise.all([
     query(
       `SELECT j.id, j.course_code, j.title, j.status, j.progress, j.step, j.error, j.provider, j.requested_by,
-              cardinality(j.request_ids) AS requesters, j.created_at, j.started_at, j.finished_at,
+              cardinality(j.request_ids) AS requesters, j.created_at, j.started_at, j.finished_at, j.retry_after,
               j.resource_id, r.title AS resource_title
        FROM ai_jobs j LEFT JOIN resources r ON r.id = j.resource_id
        ORDER BY (j.status IN ('queued', 'running')) DESC, j.created_at DESC LIMIT 60`
