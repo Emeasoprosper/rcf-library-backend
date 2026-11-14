@@ -234,7 +234,11 @@ router.post('/requests', async (req, res) => {
   const askedText = `${title} ${asked || ''}`
   const type = ['lecture_notes', 'past_question', 'book', 'audio'].includes(req.body.type)
     ? req.body.type
-    : PAST_QUESTION_RE.test(askedText) ? 'past_question' : looksLikeLectureNotes(askedText) ? 'lecture_notes' : null
+    : PAST_QUESTION_RE.test(askedText)
+      ? 'past_question'
+      : looksLikeLectureNotes(askedText) || courseCode // a course with no kind named = its notes
+        ? 'lecture_notes'
+        : null
 
   await ensureWhatsappRequests()
   const existing = await query(

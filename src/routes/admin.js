@@ -752,6 +752,28 @@ router.get('/requests', async (req, res) => {
     if (row.details && Object.keys(row.details).length > 0) group.details.push(row.details)
   }
 
+  // The AI lecture-notes job for each request, if one was started, so the
+  // card can show "Writing… 45%", "Failed: Regenerate", etc.
+  await ensureAiTables()
+  const allIds = result.rows.map((r) => r.id)
+  const jobs = allIds.length
+    ? (
+        await query(
+          `SELECT DISTINCT ON (rid) rid, j.id, j.status, j.progress, j.step, j.error, j.resource_id, j.created_at
+           FROM ai_jobs j, unnest(j.request_ids) AS rid
+           WHERE rid = ANY($1::uuid[])
+           ORDER BY rid, j.created_at DESC`,
+          [allIds]
+        )
+      ).rows
+    : []
+  const jobFor = (memberIds) => {
+    const found = jobs.filter((j) => memberIds.includes(j.rid))
+    if (!found.length) return null
+    const j = found.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0]
+    return { id: j.id, status: j.status, progress: j.progress, step: j.step, error: j.error, resourceId: j.resource_id }
+  }
+
   const items = Array.from(groups.values()).map((g) => ({
     id: g.memberIds[0], // used only as a stable React key
     memberIds: g.memberIds,
@@ -762,9 +784,24 @@ router.get('/requests', async (req, res) => {
     requesters: g.requesters,
     notes: g.notes,
     details: g.details,
+    aiJob: jobFor(g.memberIds),
   }))
 
   res.json({ items })
+})
+
+// POST /admin/requests/generate-notes  { requestIds, courseCode?, title }
+// Has the AI write lecture notes for a request (or writes them again). When
+// done, everyone in the group gets the link and the request is fulfilled.
+router.post('/requests/generate-notes', async (req, res) => {
+  const requestIds = (Array.isArray(req.body.requestIds) ? req.body.requestIds : []).filter((id) => /^[0-9a-f-]{36}$/i.test(id))
+  const title = String(req.body.title || '').trim()
+  const courseCode = String(req.body.courseCode || '').trim() || null
+  if (!requestIds.length || (!courseCode && title.length < 3)) return res.status(400).json({ error: 'Missing request or course.' })
+  const result = await requestLectureNotes({ courseCode, title, requestIds, requestedBy: `Admin: ${req.user.name || 'admin'}`, force: true })
+  if (result.status === 'unavailable') return res.status(503).json({ error: 'No AI key is set on the server (GEMINI_API_KEY).' })
+  await logAction(req.user.id, 'ai_notes.create', 'material_request', requestIds[0], { courseCode, title })
+  res.status(201).json(result)
 })
 
 // PATCH /admin/requests/:id
