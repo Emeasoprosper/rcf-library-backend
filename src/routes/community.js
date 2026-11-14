@@ -172,6 +172,17 @@ router.get('/leaderboard', async (req, res) => {
 // MATERIAL REQUESTS
 // ---------------------------------------------------------
 
+// GET /bro-paul — the WhatsApp number Bro Paul is linked to (reported by the
+// bot itself), for the app's floating "Chat with Bro Paul" button.
+router.get('/bro-paul', async (req, res) => {
+  const result = await query(`SELECT state, phone, updated_at FROM whatsapp_bot_status WHERE id = 1`).catch(() => ({ rows: [] }))
+  const row = result.rows[0]
+  const phone = String(row?.phone || process.env.BRO_PAUL_NUMBER || '').replace(/\D/g, '')
+  const online = row?.state === 'online' && Date.now() - new Date(row.updated_at).getTime() < 5 * 60 * 1000
+  res.setHeader('Cache-Control', 'public, max-age=300')
+  res.json({ phone: phone.length >= 8 ? phone : null, online })
+})
+
 router.post('/requests', attachUser, requireAuth, async (req, res) => {
   const { title, courseCode, notes, categoryId, details } = req.body
 
