@@ -247,6 +247,22 @@ export async function requestLectureNotes({ courseCode, title, level, requestIds
   )
   if (active.rows.length) return { status: 'queued', jobId: active.rows[0].id }
 
+  // A failed job for this course that already has work saved: carry on from
+  // it (just publishing, if it's fully written) instead of writing it again.
+  const resumable = await query(
+    `UPDATE ai_jobs SET status = 'queued', error = NULL, retry_after = NULL, claimed_by = NULL, finished_at = NULL,
+            step = 'Continuing from the saved work',
+            request_ids = (SELECT array_agg(DISTINCT x) FROM unnest(request_ids || $2::uuid[]) x)
+     WHERE id = (SELECT id FROM ai_jobs WHERE kind = 'lecture_notes' AND course_key = $1 AND status = 'failed' AND draft ? 'plan'
+                 ORDER BY created_at DESC LIMIT 1)
+     RETURNING id`,
+    [key, requestIds]
+  )
+  if (resumable.rows.length) {
+    kickWorker()
+    return { status: 'queued', jobId: resumable.rows[0].id }
+  }
+
   const inserted = await query(
     `INSERT INTO ai_jobs (kind, course_key, course_code, title, level, request_ids, requested_by, provider)
      VALUES ('lecture_notes', $1, $2, $3, $4, $5, $6, $7) RETURNING id`,
@@ -272,8 +288,8 @@ async function publishNotes(job, notes, pdf) {
        title, author, description, course_code, department_id, level, resource_type_id,
        storage_provider, file_id, file_url, file_name, file_type, file_size_bytes,
        uploaded_by, is_anonymous, thumbnail_status, status, reviewed_at, ai_origin, file_sha256
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'application/pdf',$12,$13,false,'pending',$14,
-               CASE WHEN $14 = 'approved' THEN now() END,'generated',$15)
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'application/pdf',$12,$13,false,'pending',$14::resource_status,
+               CASE WHEN $14::text = 'approved' THEN now() END,'generated',$15)
      RETURNING id, title, thumbnail_url`,
     [
       title, AI_AUTHOR, description, course.code || notes.courseCode || null, course.departmentId || null,
@@ -302,7 +318,19 @@ async function finishNotes(job, notes) {
     `UPDATE ai_jobs SET status = 'done', progress = 100, step = $2, resource_id = $3, provider = $4, finished_at = now(), draft = NULL, retry_after = NULL WHERE id = $1`,
     [job.id, published ? 'Published' : 'Waiting for review', resource.id, `${notes.provider}${notes.model ? ` (${notes.model})` : ''}`]
   )
-  const fulfilled = published ? await fulfilRequests(job.request_ids || [], resource, { aiWritten: true }) : 0
+  // Other jobs for the same course that haven't got as far (e.g. started by
+  // pressing Regenerate on a failed one): this finished copy serves them too.
+  const dupes = await query(
+    `UPDATE ai_jobs SET status = 'done', progress = 100, step = 'Same course already written', resource_id = $3,
+            claimed_by = NULL, finished_at = now(), draft = NULL
+     WHERE kind = 'lecture_notes' AND course_key = $1 AND id <> $2 AND status IN ('queued', 'running', 'failed')
+       AND NOT (coalesce(draft, '{}'::jsonb) ? 'revision')
+     RETURNING request_ids`,
+    [job.course_key, job.id, resource.id]
+  ).catch(() => ({ rows: [] }))
+  const extraRequests = dupes.rows.flatMap((r) => r.request_ids || [])
+
+  const fulfilled = published ? await fulfilRequests([...(job.request_ids || []), ...extraRequests], resource, { aiWritten: true }) : 0
   await notifyAdmins({
     type: 'ai_notes',
     title: `✍️ AI wrote lecture notes: ${resource.title}`,
@@ -410,6 +438,19 @@ export async function retryJob(id) {
   return r.rows.length > 0
 }
 
+// Every failed job back in the queue, keeping what's written. Fully written
+// ones just get published (no AI needed).
+export async function retryAllFailed() {
+  await ensureAiTables()
+  const r = await query(
+    `UPDATE ai_jobs SET status = 'queued', step = 'Continuing from the saved work', error = NULL, retry_after = NULL,
+            claimed_by = NULL, finished_at = NULL
+     WHERE status = 'failed' RETURNING id`
+  )
+  if (r.rows.length) kickWorker()
+  return r.rows.length
+}
+
 // ---------- Your own AI on Kaggle (the "worker") ----------
 // The notebook only runs the model. The server tells it what to write next
 // (plan -> each week -> revision), keeps the draft, and makes the PDF, so
@@ -472,6 +513,31 @@ export async function workerClaim(model) {
   await ensureAiTables()
   await workerHeartbeat(model)
   await releaseSilentWorkerJobs()
+  // A job that's already fully written only needs publishing: do it here
+  // and look for the next one, so the worker always gets real writing.
+  for (let i = 0; i < 20; i += 1) {
+    const claimed = await claimOne()
+    if (!claimed) return null
+    if (claimed.task) return { jobId: claimed.jobId, title: claimed.title, task: claimed.task }
+    await query(`UPDATE ai_jobs SET progress = 96, step = 'Publishing to the library' WHERE id = $1`, [claimed.jobId])
+    await finishNotes(claimed.job, notesFromDraft(claimed.job.draft)).catch(async (err) => {
+      await query(`UPDATE ai_jobs SET status = 'failed', error = $2, claimed_by = NULL WHERE id = $1`, [claimed.jobId, String(err.message).slice(0, 500)])
+    })
+  }
+  return null
+}
+
+function notesFromDraft(draft) {
+  return {
+    ...draft.plan,
+    chapters: [...(draft.chapters || [])].sort((a, b) => a.week - b.week),
+    revision: draft.revision,
+    provider: 'kaggle',
+    model: (draft.writers || []).join(' + ') || 'own model',
+  }
+}
+
+async function claimOne() {
   const r = await query(
     `UPDATE ai_jobs SET status = 'running', claimed_by = 'kaggle', worker_seen = now(), retry_after = NULL, error = NULL,
             started_at = COALESCE(started_at, now())
@@ -484,7 +550,7 @@ export async function workerClaim(model) {
   const info = { ...job, title: job.title || course.title, level: job.level || course.level, department: course.departmentName }
   const [progress, step] = progressFor(job.draft)
   await query(`UPDATE ai_jobs SET progress = $2, step = $3 WHERE id = $1`, [job.id, progress, step])
-  return { jobId: job.id, title: [job.course_code, info.title].filter(Boolean).join(' – '), task: taskFor(info, job.draft) }
+  return { jobId: job.id, job, title: [job.course_code, info.title].filter(Boolean).join(' – '), task: taskFor(info, job.draft) }
 }
 
 // The worker's answer to one step. Saves it, then returns the next step, or
@@ -499,7 +565,15 @@ export async function workerAnswer(jobId, { kind, week, text, model }) {
 
   if (kind === 'plan') {
     const course = job.course_code ? await lookupCourse(job.course_code) : {}
-    draft.plan = parsePlan(clean, { courseCode: job.course_code, title: job.title || course.title, level: job.level || course.level })
+    try {
+      draft.plan = parsePlan(clean, { courseCode: job.course_code, title: job.title || course.title, level: job.level || course.level })
+    } catch (err) {
+      // Unreadable plan: ask the model to write the plan again.
+      console.warn(`Kaggle plan for ${job.course_code || job.title} unreadable (${err.message}); asking again`)
+      await query(`UPDATE ai_jobs SET worker_seen = now(), step = 'Your Kaggle AI is planning the course again' WHERE id = $1`, [jobId])
+      const info = { ...job, title: job.title || course.title, level: job.level || course.level, department: course.departmentName }
+      return { next: taskFor(info, null) }
+    }
     draft.chapters = []
   } else if (kind === 'chapter') {
     const w = draft.plan?.schemeOfWork?.find((x) => x.week === Number(week))
@@ -522,14 +596,7 @@ export async function workerAnswer(jobId, { kind, week, text, model }) {
 
   // All written: make the PDF and publish (same as the server's own writer).
   await query(`UPDATE ai_jobs SET progress = 96, step = 'Publishing to the library' WHERE id = $1`, [jobId])
-  const notes = {
-    ...draft.plan,
-    chapters: [...draft.chapters].sort((a, b) => a.week - b.week),
-    revision: draft.revision,
-    provider: 'kaggle',
-    model: draft.writers.join(' + '),
-  }
-  const resource = await finishNotes(job, notes)
+  const resource = await finishNotes(job, notesFromDraft(draft))
   await query(`UPDATE ai_worker_status SET jobs_done = jobs_done + 1 WHERE id = 1`).catch(() => {})
   return { done: true, resourceId: resource.id, title: resource.title }
 }
@@ -624,8 +691,8 @@ export async function publishBotUpload({ files, caption = '', courseCode, type, 
        title, author, description, course_code, department_id, level, resource_type_id,
        storage_provider, file_id, file_url, file_name, file_type, file_size_bytes,
        uploaded_by, is_anonymous, thumbnail_status, status, reviewed_at, ai_origin, file_sha256
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,true,'pending',$15,
-               CASE WHEN $15 = 'approved' THEN now() END,'bot_upload',$16)
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,true,'pending',$15::resource_status,
+               CASE WHEN $15::text = 'approved' THEN now() END,'bot_upload',$16)
      RETURNING id, title, thumbnail_url`,
     [
       title, author, description, course.code || code || null, course.departmentId || null, course.level || null, await typeId(slug),

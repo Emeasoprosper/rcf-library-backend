@@ -14,7 +14,7 @@ import { ensureGroupSettingsColumn, cleanGroupSettings, withGroupDefaults } from
 import { ensureChatLogTables, chatLogUsage } from '../services/botChatLog.js'
 import { isWhatsappRequest, readyMessage } from '../services/whatsappRequests.js'
 import { ensureReviewColumns } from '../services/appReviews.js'
-import { ensureAiTables, requestLectureNotes, retryJob, workerStatus } from '../services/aiLibrary.js'
+import { ensureAiTables, requestLectureNotes, retryAllFailed, retryJob, workerStatus } from '../services/aiLibrary.js'
 import { notesProvider } from '../services/noteGenerator.js'
 
 const router = Router()
@@ -1303,6 +1303,13 @@ router.post('/ai-library/notes', async (req, res) => {
   if (result.status === 'unavailable') return res.status(503).json({ error: 'No AI key is set on the server (GEMINI_API_KEY).' })
   await logAction(req.user.id, 'ai_notes.create', 'ai_job', result.jobId || '', { courseCode, title })
   res.status(201).json(result)
+})
+
+// POST /admin/ai-library/retry-failed — every failed job again, keeping what's written.
+router.post('/ai-library/retry-failed', async (req, res) => {
+  const count = await retryAllFailed()
+  await logAction(req.user.id, 'ai_notes.retry_all', 'ai_job', '', { count })
+  res.json({ ok: true, count })
 })
 
 // POST /admin/ai-library/jobs/:id/retry — run a failed job again.

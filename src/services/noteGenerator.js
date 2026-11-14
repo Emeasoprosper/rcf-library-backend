@@ -276,10 +276,22 @@ export function cleanText(s) {
     .trim()
 }
 
+// Models sometimes slip on JSON (a trailing or missing comma, smart quotes,
+// a comment). Try as written, then with the usual slips repaired.
 function parseJsonBlock(text) {
   const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(text)
   const raw = fenced ? fenced[1] : text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1)
-  return JSON.parse(raw)
+  try {
+    return JSON.parse(raw)
+  } catch {
+    const repaired = raw
+      .replace(/[“”]/g, '"')
+      .replace(/[‘’]/g, "'")
+      .replace(/^\s*\/\/.*$/gm, '') // whole-line comments
+      .replace(/,\s*([}\]])/g, '$1') // trailing commas
+      .replace(/("|\d|true|false|null|[}\]])\s*\n(\s*)(?=["{[])/g, '$1,\n$2') // missing comma between lines
+    return JSON.parse(repaired)
+  }
 }
 
 export function planPrompt({ courseCode, title, level, department }) {

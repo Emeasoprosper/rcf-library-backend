@@ -13,15 +13,24 @@
 # the RCF logo, publishes it and messages the person who asked.
 
 import json, os, re, subprocess, sys, time
+print("Starting the RCF notes AI… (step 1 of 3: installing)", flush=True)
 
-API = "https://rcf-library-backend.onrender.com/api/ai-worker"
+API ="https://rcf-library-backend.onrender.com/api/ai-worker"
 MODEL = os.environ.get("NOTES_MODEL", "qwen3:14b")   # strong + fits one T4 GPU
-RUN_HOURS = 11.5                                      # Kaggle stops sessions at 12h
+RUN_HOURS = 11.7                                      # Kaggle kills a session at exactly 12h
+JOB_MINUTES = 80                                      # one course takes ~70 min on a T4
 IDLE_WAIT = 60                                        # seconds between checks when the queue is empty
 
 def sh(cmd):
+    """Runs a shell command and shows its output here (Kaggle hides it otherwise)."""
     print("$", cmd, flush=True)
-    subprocess.run(cmd, shell=True, check=True)
+    p = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    for line in p.stdout:
+        line = line.strip()
+        if line:
+            print("  ", line[-160:], flush=True)
+    if p.wait() != 0:
+        raise SystemExit(f"Command failed: {cmd}")
 
 # ---------- 1. Ollama + model ----------
 try:
@@ -31,8 +40,12 @@ except ImportError:
     import requests
 
 if subprocess.run("which ollama", shell=True, capture_output=True).returncode != 0:
+    # Ollama's installer unpacks with zstd, which Kaggle's machine lacks.
+    if subprocess.run("which zstd", shell=True, capture_output=True).returncode != 0:
+        sh("(apt-get update -qq && apt-get install -y -qq zstd) || (sudo apt-get update -qq && sudo apt-get install -y -qq zstd)")
     sh("curl -fsSL https://ollama.com/install.sh | sh")
 
+print("Installed. Starting Ollama…", flush=True)
 server = subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 for _ in range(60):
     try:
@@ -40,7 +53,28 @@ for _ in range(60):
         break
     except Exception:
         time.sleep(1)
-sh(f"ollama pull {MODEL}")
+else:
+    raise SystemExit("Ollama did not start. Restart the session (Run -> Restart & clear outputs) and run again.")
+
+# Download the model with a visible percentage (about 9 GB the first time).
+print(f"Step 2 of 3: downloading the AI model {MODEL} (about 9 GB, a few minutes)…", flush=True)
+last = -10
+with requests.post("http://127.0.0.1:11434/api/pull", json={"model": MODEL, "stream": True}, stream=True, timeout=3600) as r:
+    for raw in r.iter_lines():
+        if not raw:
+            continue
+        msg = json.loads(raw)
+        if msg.get("error"):
+            raise SystemExit("Model download failed: " + msg["error"])
+        total, done = msg.get("total"), msg.get("completed")
+        if total and done:
+            pct = int(done * 100 / total)
+            if pct >= last + 10:
+                last = pct
+                print(f"   downloading… {pct}% of {total / 1e9:.1f} GB", flush=True)
+        elif msg.get("status") and "pulling" not in msg["status"]:
+            print("  ", msg["status"], flush=True)
+print("Model ready. Step 3 of 3: connecting to your library…", flush=True)
 
 # ---------- 2. Your library ----------
 try:
@@ -93,6 +127,11 @@ print(f"\n=== Your RCF notes AI is running ({MODEL}). Leave this tab open. ===\n
 deadline = time.time() + RUN_HOURS * 3600
 written = 0
 while time.time() < deadline:
+    # Not enough time left for a whole course: stop cleanly instead of
+    # being cut off halfway (whatever is unwritten waits for the next run).
+    if deadline - time.time() < JOB_MINUTES * 60:
+        print("Less than", JOB_MINUTES, "minutes left in this session; not starting another course.", flush=True)
+        break
     try:
         job = call("/claim", {"model": MODEL}).get("job")
     except Exception as e:
@@ -109,7 +148,13 @@ while time.time() < deadline:
     print(f"\n>>> {job['title']}", flush=True)
     try:
         while task:
-            label = f"week {task['week']}" if task["kind"] == "chapter" else task["kind"]
+            if time.time() > deadline:
+                # Session almost over: hand the course back (everything written is kept).
+                call(f"/jobs/{job_id}/release", {"error": "Kaggle session ended"})
+                print("  Session time is up; handed this course back with its progress saved.", flush=True)
+                task = None
+                break
+            label =f"week {task['week']}" if task["kind"] == "chapter" else task["kind"]
             started = time.time()
             text = ""
             for attempt in range(3):
