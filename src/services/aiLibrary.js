@@ -32,7 +32,7 @@ import {
   revisionPrompt,
 } from './noteGenerator.js'
 import { renderNotesPdf } from './notesPdf.js'
-import { isWhatsappRequest, readyMessage, SITE_URL } from './whatsappRequests.js'
+import { isWhatsappRequest, queueReadyDm, SITE_URL } from './whatsappRequests.js'
 import { sendPushToUser } from '../routes/community.js'
 
 export const AI_AUTHOR = 'RCF MOUAU'
@@ -167,18 +167,12 @@ export async function fulfilRequests(requestIds, resource, { aiWritten = false }
       ).catch(() => {})
       sendPushToUser(row.user_id, { title: aiWritten ? '✍️ Your lecture notes are ready!' : 'Your request was fulfilled!', body, url: `/library/${resource.id}` }).catch(() => {})
     } else if (isWhatsappRequest(row.details)) {
-      const text = readyMessage({
-        whatsappName: row.details.whatsappName,
-        requestTitle: row.title,
-        resourceId: resource.id,
-        resourceTitle: resource.title,
-        aiWritten,
-      })
-      await query(`INSERT INTO whatsapp_bot_outbox (group_jid, text, kind, created_by) VALUES ($1, $2, 'request_ready', $3)`, [
+      // Combined with any other books ready for them, guide once a day.
+      await queueReadyDm(
         row.details.whatsappId,
-        text,
-        systemId,
-      ]).catch(() => query(`INSERT INTO whatsapp_bot_outbox (group_jid, text) VALUES ($1, $2)`, [row.details.whatsappId, text]))
+        { whatsappName: row.details.whatsappName, requestTitle: row.title, resourceId: resource.id, resourceTitle: resource.title, aiWritten },
+        systemId
+      ).catch((err) => console.error('Queue ready DM failed:', err.message))
     }
   }
   return count
@@ -309,9 +303,28 @@ async function publishNotes(job, notes, pdf) {
   return { resource, published: settings.aiNotesAutoPublish }
 }
 
+// "ACC211 FINANCIAL ACCOUNTING I UNIT (3)" -> "Financial Accounting I".
+export function tidyCourseTitle(raw) {
+  let t = String(raw || '')
+    .replace(/\(?\b\d+\s*units?\b\)?|\bunits?\s*\(?\s*\d+\s*\)?/gi, ' ')
+    .replace(/\b[A-Za-z]{3}\s?-?\d{3}\b/g, ' ')
+    .replace(/\blecture\s*notes?\b/gi, ' ')
+    .replace(/^[\s,;:–-]+|[\s,;:–-]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (t && t === t.toUpperCase()) {
+    t = t.toLowerCase().replace(/\b([a-z])([a-z]*)/g, (w, a, b) => (/^(of|and|to|in|for|the|on|a|an)$/.test(w) ? w : a.toUpperCase() + b))
+    // Roman numerals stay capitals (I, II, III, IV…).
+    t = t.replace(/\b(i{1,3}|iv|vi{0,3}|ix|x)\b/gi, (m) => m.toUpperCase())
+    t = t.charAt(0).toUpperCase() + t.slice(1)
+  }
+  return t
+}
+
 // PDF -> library -> requests fulfilled -> admins told. Used by the server's
 // own writer and by the Kaggle worker once its last chapter arrives.
 async function finishNotes(job, notes) {
+  notes = { ...notes, courseTitle: tidyCourseTitle(notes.courseTitle) || notes.courseTitle }
   const pdf = await renderNotesPdf(notes)
   const { resource, published } = await publishNotes(job, notes, pdf)
   await query(
@@ -358,6 +371,9 @@ async function runJob(job) {
         saveDraft: (draft) => query(`UPDATE ai_jobs SET draft = $2 WHERE id = $1`, [job.id, JSON.stringify(draft)]),
       }
     )
+    // Taken back for being too slow (another run owns it now): don't publish twice.
+    const still = await query(`SELECT 1 FROM ai_jobs WHERE id = $1 AND status = 'running' AND started_at = $2`, [job.id, job.started_at])
+    if (!still.rows.length) return
     progress(96, 'Publishing to the library')
     await finishNotes(job, notes)
   } catch (err) {
@@ -388,22 +404,52 @@ async function runJob(job) {
 
 // One job at a time, oldest first. Survives restarts: jobs left "running"
 // when the server stopped are queued again on start.
+// The server's own writer (Gemini, then Groq). While your Kaggle AI is
+// online it writes better notes, so the server leaves new writing to it and
+// only publishes jobs that are already fully written.
+const SERVER_JOB_LIMIT_MS = 45 * 60 * 1000 // a job taking longer than this is stuck
 let working = false
+let workingSince = 0
+
 export function kickWorker() {
-  if (working) return
+  // A run that's been "busy" far too long is stuck (e.g. a hung upload):
+  // let a fresh run start; its job is put back in the queue below.
+  if (working && Date.now() - workingSince < SERVER_JOB_LIMIT_MS + 5 * 60 * 1000) return
   working = true
+  workingSince = Date.now()
   ;(async () => {
     try {
       await releaseSilentWorkerJobs()
+      await releaseStuckServerJobs()
       for (;;) {
+        const kaggleOnline = (await workerStatus()).online
         const next = await query(
           `UPDATE ai_jobs SET status = 'running', started_at = now(), step = 'Starting', error = NULL, claimed_by = 'server'
            WHERE id = (SELECT id FROM ai_jobs WHERE status = 'queued' AND (retry_after IS NULL OR retry_after <= now())
+                         AND ($1::boolean = false OR coalesce(draft, '{}'::jsonb) ? 'revision')
                        ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED)
-           RETURNING *`
+           RETURNING *`,
+          [kaggleOnline]
         )
         if (!next.rows.length) break
-        await runJob(next.rows[0])
+        workingSince = Date.now()
+        const job = next.rows[0]
+        let timer
+        await Promise.race([
+          runJob(job),
+          new Promise((resolve) => {
+            timer = setTimeout(async () => {
+              console.error(`AI notes job ${job.id} took over 45 minutes; putting it back in the queue`)
+              await query(
+                `UPDATE ai_jobs SET status = 'queued', claimed_by = NULL, retry_after = now() + interval '10 minutes',
+                        step = 'Took too long; trying again shortly (progress kept)' WHERE id = $1 AND status = 'running'`,
+                [job.id]
+              ).catch(() => {})
+              resolve()
+            }, SERVER_JOB_LIMIT_MS)
+          }),
+        ])
+        clearTimeout(timer)
       }
     } catch (err) {
       console.error('AI library worker stopped:', err.message)
@@ -413,14 +459,24 @@ export function kickWorker() {
   })()
 }
 
+// Server jobs left "running" with no progress for 45+ minutes (the server
+// restarted, or a step hung): back to the queue, keeping what's written.
+async function releaseStuckServerJobs() {
+  await query(
+    `UPDATE ai_jobs SET status = 'queued', claimed_by = NULL, step = 'Restarting a stuck job (progress kept)'
+     WHERE status = 'running' AND claimed_by IS DISTINCT FROM 'kaggle'
+       AND started_at < now() - interval '45 minutes'`
+  ).catch(() => {})
+}
+
 let ticking = null
 export async function startAiLibrary() {
   try {
     await ensureAiTables()
     await query(`UPDATE ai_jobs SET status = 'queued' WHERE status = 'running' AND claimed_by IS DISTINCT FROM 'kaggle'`)
     kickWorker()
-    // Picks up jobs that were waiting for the AI limit to reset.
-    ticking ||= setInterval(kickWorker, 10 * 60 * 1000)
+    // Picks up jobs waiting for the AI limit, and stuck ones.
+    ticking ||= setInterval(kickWorker, 5 * 60 * 1000)
   } catch (err) {
     console.error('AI library start failed:', err.message)
   }
@@ -617,6 +673,63 @@ function guessType(text) {
   return null
 }
 
+// Is this really study material? Bro Paul used to judge by the caption alone,
+// so a church flyer saying "ETF Lecture Hall" went into the library. Now the
+// AI looks at the actual picture(s) or PDF first.
+// Returns { verdict: 'material' | 'not_material' | 'unknown', type, reason, title, courseCode }.
+const MATERIAL_CHECK = `You check files that people sent to a university library's WhatsApp assistant, and decide if they are STUDY MATERIAL for the library.
+
+Study material: past question papers or exam/test questions (even one photographed page), lecture notes or handouts, textbook or book pages, course outlines, assignments/tutorial sheets with academic questions, academic slides, research papers, devotional or Christian books.
+NOT study material: event flyers or posters (church services, programmes, concerts, birthdays, adverts), memes, selfies or photos of people/places, screenshots of chats, receipts, ID cards, timetables of events, announcements, certificates, random photos.
+
+Reply with ONLY one JSON object:
+{"material": true or false, "type": "past_question" | "lecture_notes" | "book" | "handout" | "slides" | "other_study" | "not_study", "reason": "max 12 words", "title": "a clear title if it is study material, else empty", "courseCode": "e.g. MTH 211 if visible, else empty"}`
+
+async function classifyMaterial({ files, caption }) {
+  const key = process.env.GEMINI_API_KEY
+  if (!key) return { verdict: 'unknown', reason: 'No AI key' }
+  const parts = []
+  const images = files.filter((f) => f.mimetype?.startsWith('image/')).slice(0, 3)
+  for (const img of images) {
+    const small = await sharp(img.buffer).rotate().resize({ width: 1100, withoutEnlargement: true }).jpeg({ quality: 75 }).toBuffer()
+    parts.push({ inlineData: { mimeType: 'image/jpeg', data: small.toString('base64') } })
+  }
+  const pdf = files.find((f) => f.mimetype === 'application/pdf')
+  if (!images.length && pdf) {
+    if (pdf.buffer.length > 12 * 1024 * 1024) return { verdict: 'unknown', reason: 'PDF too large to check' }
+    parts.push({ inlineData: { mimeType: 'application/pdf', data: pdf.buffer.toString('base64') } })
+  }
+  if (!parts.length) return { verdict: 'unknown', reason: 'File type not checkable' } // Word/PowerPoint
+  parts.push({ text: `Caption or file name: "${String(caption || '').slice(0, 300)}"` })
+
+  const model = process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite'
+  try {
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: MATERIAL_CHECK }] },
+        contents: [{ role: 'user', parts }],
+        generationConfig: { temperature: 0, maxOutputTokens: 300, responseMimeType: 'application/json' },
+      }),
+      signal: AbortSignal.timeout(60000),
+    })
+    if (!res.ok) return { verdict: 'unknown', reason: `AI check unavailable (${res.status})` }
+    const data = await res.json()
+    const text = (data.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('')
+    const out = JSON.parse(text.replace(/^```(json)?|```$/g, '').trim())
+    return {
+      verdict: out.material === true ? 'material' : 'not_material',
+      type: out.type || null,
+      reason: String(out.reason || '').slice(0, 120),
+      title: String(out.title || '').slice(0, 160),
+      courseCode: String(out.courseCode || '').slice(0, 20),
+    }
+  } catch (err) {
+    return { verdict: 'unknown', reason: `AI check failed: ${err.message}`.slice(0, 120) }
+  }
+}
+
 // Photos of past questions arrive as several images: one PDF, page per image.
 async function imagesToPdf(files) {
   const pdf = await PDFDocument.create()
@@ -631,10 +744,18 @@ async function imagesToPdf(files) {
 
 // files: [{ buffer, mimetype, originalname }] (several images become one PDF).
 // Returns { status: 'published' | 'pending' | 'duplicate', resourceId, title, url, fulfilled }.
-export async function publishBotUpload({ files, caption = '', courseCode, type, whatsappName = '', groupName = '' }) {
+// confirmed = the sender said it's for the library (answered Bro Paul's
+// "is this for the library?" with a course code), so an AI check that
+// couldn't run (or guessed wrong) doesn't block it; they said so in a DM.
+export async function publishBotUpload({ files, caption = '', courseCode, type, whatsappName = '', groupName = '', confirmed = false }) {
   await ensureAiTables()
   const settings = await getBotSettings()
   const images = files.filter((f) => f.mimetype?.startsWith('image/'))
+
+  const check = await classifyMaterial({ files, caption: `${caption} ${files.map((x) => x.originalname || '').join(' ')}` })
+  if (check.verdict === 'not_material' && !confirmed) return { status: 'not_material', reason: check.reason }
+  const checkable = images.length > 0 || files.some((x) => x.mimetype === 'application/pdf')
+  if (check.verdict === 'unknown' && checkable && !confirmed) return { status: 'unverified', reason: check.reason }
   let file
   if (images.length && images.length === files.length) {
     const buffer = await imagesToPdf(images)
@@ -650,9 +771,13 @@ export async function publishBotUpload({ files, caption = '', courseCode, type, 
   if (dup.rows.length) return { status: 'duplicate', resourceId: dup.rows[0].id, title: dup.rows[0].title, url: `${SITE_URL}/library/${dup.rows[0].id}`, fulfilled: 0 }
 
   const hint = `${caption} ${file.originalname || ''}`
-  let slug = type || guessType(hint)
-  let code = normalizeCourseCode(courseCode) || normalizeCourseCode((/\b([A-Za-z]{3})\s?-?(\d{3})\b/.exec(hint) || []).slice(1).join(' '))
-  let title = null
+  const aiType = ['past_question', 'lecture_notes', 'book'].includes(check.type) ? check.type : check.type === 'handout' ? 'lecture_notes' : null
+  let slug = type || guessType(hint) || aiType
+  let code =
+    normalizeCourseCode(courseCode) ||
+    normalizeCourseCode((/\b([A-Za-z]{3})\s?-?(\d{3})\b/.exec(hint) || []).slice(1).join(' ')) ||
+    normalizeCourseCode(check.courseCode)
+  let title = check.title || null
   let author = null
 
   // Let the AI read the file for a proper title / course / author.
@@ -666,7 +791,7 @@ export async function publishBotUpload({ files, caption = '', courseCode, type, 
       filenameTitle: /^(whatsapp|img|doc|document|file|scan)\b/i.test(filenameTitle) ? null : filenameTitle,
     })
     if (suggestion) {
-      title = suggestion.title || null
+      title = suggestion.title || title
       author = suggestion.author || null
       if (!code && suggestion.course?.code) code = normalizeCourseCode(suggestion.course.code)
       if (!slug) slug = guessType(`${suggestion.title || ''} ${suggestion.description || ''}`)

@@ -12,7 +12,7 @@ import { sendPush } from '../services/pushService.js'
 import { getBotSettings, cleanBotSettings } from '../services/botSettings.js'
 import { ensureGroupSettingsColumn, cleanGroupSettings, withGroupDefaults } from '../services/groupSettings.js'
 import { ensureChatLogTables, chatLogUsage } from '../services/botChatLog.js'
-import { isWhatsappRequest, readyMessage } from '../services/whatsappRequests.js'
+import { isWhatsappRequest, queueReadyDm } from '../services/whatsappRequests.js'
 import { ensureReviewColumns } from '../services/appReviews.js'
 import { ensureAiTables, requestLectureNotes, retryAllFailed, retryJob, workerStatus } from '../services/aiLibrary.js'
 import { notesProvider } from '../services/noteGenerator.js'
@@ -851,15 +851,20 @@ router.patch('/requests/:id', async (req, res) => {
   const { user_id: requesterId, title: requestTitle, details } = result.rows[0]
   if (!requesterId) {
     if (isWhatsappRequest(details)) {
-      const name = details.whatsappName ? ` ${details.whatsappName.split(' ')[0]}` : ''
-      // Warm, never a refusal (see readyMessage in whatsappRequests.js).
-      const text =
-        status === 'fulfilled'
-          ? readyMessage({ whatsappName: details.whatsappName, requestTitle, resourceId: linked?.id, resourceTitle: linked?.title })
-          : `Hi${name}, about "${requestTitle}" that you asked for: the library team couldn't add it. Reason: ${declineReason}`
-      await query(`INSERT INTO whatsapp_bot_outbox (group_jid, text, created_by) VALUES ($1, $2, $3)`, [details.whatsappId, text, req.user.id]).catch((err) =>
-        console.error('WhatsApp request reply failed:', err.message)
-      )
+      if (status === 'fulfilled') {
+        // Combined with any other books ready for them; guide once a day.
+        await queueReadyDm(
+          details.whatsappId,
+          { whatsappName: details.whatsappName, requestTitle, resourceId: linked?.id, resourceTitle: linked?.title },
+          req.user.id
+        ).catch((err) => console.error('WhatsApp request reply failed:', err.message))
+      } else {
+        const name = details.whatsappName ? ` ${details.whatsappName.split(' ')[0]}` : ''
+        const text = `Hi${name}, about "${requestTitle}" that you asked for: the library team couldn't add it. Reason: ${declineReason}`
+        await query(`INSERT INTO whatsapp_bot_outbox (group_jid, text, created_by) VALUES ($1, $2, $3)`, [details.whatsappId, text, req.user.id]).catch((err) =>
+          console.error('WhatsApp request reply failed:', err.message)
+        )
+      }
     }
     return res.json({ ok: true })
   }
@@ -1564,6 +1569,58 @@ router.get('/whatsapp/outbox', requireRole('superadmin'), async (req, res) => {
      ORDER BY o.created_at DESC LIMIT 20`
   )
   res.json({ items: result.rows })
+})
+
+// GET /admin/whatsapp/contacts.vcf — everyone who has chatted with Bro Paul
+// privately, as a contacts file the phone imports in one tap. Names: the
+// name they told him, else their WhatsApp name. Ids that hide the number
+// (WhatsApp "@lid" ids) can't be saved as contacts and are skipped.
+router.get('/whatsapp/contacts.vcf', requireRole('superadmin'), async (req, res) => {
+  const people = new Map() // number -> { name, note }
+  const phoneOf = (jid) => (String(jid).match(/^(\d{7,15})(?::\d+)?@s\.whatsapp\.net$/) || [])[1] || ''
+
+  const chats = await query(
+    `SELECT chat_jid, max(chat_name) FILTER (WHERE NOT from_bot) AS name, max(created_at) AS last
+     FROM whatsapp_messages WHERE chat_type = 'private' GROUP BY chat_jid`
+  ).catch(() => ({ rows: [] }))
+  for (const c of chats.rows) {
+    const phone = phoneOf(c.chat_jid)
+    if (phone) people.set(phone, { name: c.name || '', notes: [] })
+  }
+  const saved = await query(`SELECT value FROM whatsapp_auth WHERE key = 'bot-state'`).catch(() => ({ rows: [] }))
+  let contacts = {}
+  try {
+    contacts = JSON.parse(saved.rows[0]?.value || '{}').contacts || {}
+  } catch {}
+  for (const [jid, c] of Object.entries(contacts)) {
+    const phone = phoneOf(jid)
+    if (!phone) continue
+    const known = people.get(phone) || { name: '', notes: [] }
+    people.set(phone, {
+      name: [c.title, c.name].filter(Boolean).join(' ') || known.name,
+      notes: (c.notes || []).map((n) => n.text).filter(Boolean),
+    })
+  }
+
+  const esc = (s) => String(s).replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/([,;])/g, '\\$1')
+  const cards = [...people.entries()].map(([phone, p]) => {
+    const name = (p.name || '').replace(/\s+/g, ' ').trim() || `RCF Contact ${phone.slice(-4)}`
+    return [
+      'BEGIN:VCARD',
+      'VERSION:3.0',
+      `FN:${esc(name)}`,
+      `N:;${esc(name)};;;`,
+      `TEL;TYPE=CELL:+${phone}`,
+      'ORG:RCF MOUAU (via Bro Paul)',
+      p.notes.length ? `NOTE:${esc(p.notes.join(' · '))}` : null,
+      'END:VCARD',
+    ].filter(Boolean).join('\r\n')
+  })
+  await logAction(req.user.id, 'whatsapp.contacts_export', 'whatsapp_bot', 'contacts', { count: cards.length })
+  res.setHeader('Content-Type', 'text/vcard; charset=utf-8')
+  res.setHeader('Content-Disposition', 'attachment; filename="bro-paul-contacts.vcf"')
+  res.setHeader('X-Contact-Count', String(cards.length))
+  res.send(cards.join('\r\n') + (cards.length ? '\r\n' : ''))
 })
 
 // Activity categories in the admin app, by the kinds the bot logs.

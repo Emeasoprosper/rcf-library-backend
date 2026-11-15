@@ -10,7 +10,7 @@ import { getBotSettings } from '../services/botSettings.js'
 import { ensureGroupSettingsColumn, withGroupDefaults } from '../services/groupSettings.js'
 import { ensureChatLogTables, saveChatMessages } from '../services/botChatLog.js'
 import { verseOfTheDay, tipOfTheDay } from '../services/dailyInspiration.js'
-import { ensureWhatsappRequests, SITE_URL } from '../services/whatsappRequests.js'
+import { composeReadyDms, ensureWhatsappRequests, SITE_URL } from '../services/whatsappRequests.js'
 import multer from 'multer'
 import {
   PAST_QUESTION_RE,
@@ -312,17 +312,23 @@ router.post('/uploads', botUpload.array('files', 20), async (req, res) => {
     type: ['lecture_notes', 'past_question', 'book'].includes(req.body.type) ? req.body.type : null,
     whatsappName: String(req.body.whatsappName || '').slice(0, 80),
     groupName,
+    confirmed: req.body.confirmed === 'true' || req.body.confirmed === true,
   })
-  res.status(201).json(result)
+  res.status(result.status === 'published' || result.status === 'pending' ? 201 : 200).json(result)
 })
 
 // GET /bot/outbox — messages a superadmin asked the bot to send.
 // kind 'intro' = introduce himself there (the bot writes it from the group's settings).
 router.get('/outbox', async (req, res) => {
   await ensureChatLogTables()
+  // "Your book is ready" DMs: one combined message per person (see
+  // composeReadyDms); ones still gathering aren't handed out yet.
+  await composeReadyDms().catch((err) => console.error('Compose ready DMs failed:', err.message))
   const result = await query(
     `SELECT id, group_jid, text, kind FROM whatsapp_bot_outbox
-     WHERE status = 'pending' ORDER BY created_at ASC LIMIT 10`
+     WHERE status = 'pending'
+       AND (kind IS DISTINCT FROM 'request_ready' OR payload->>'composed' = 'true')
+     ORDER BY created_at ASC LIMIT 10`
   )
   res.json({ items: result.rows })
 })
@@ -344,6 +350,10 @@ router.post('/outbox/:id', async (req, res) => {
      WHERE id = $1 AND status = 'pending'`,
     [req.params.id, status, error]
   )
+  // A combined message that failed: the books merged into it failed too.
+  if (status === 'failed') {
+    await query(`UPDATE whatsapp_bot_outbox SET status = 'failed', error = $2, sent_at = NULL WHERE merged_into = $1`, [req.params.id, error]).catch(() => {})
+  }
   res.json({ ok: true })
 })
 
