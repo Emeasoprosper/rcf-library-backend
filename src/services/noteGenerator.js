@@ -103,6 +103,7 @@ async function askGemini(opts) {
     .filter((m) => (unusable.get(m) || 0) < Date.now())
   let lastErr
   let quotaOnly = true
+  let sawQuota = false // any model out of its limit: the job waits instead of failing
   for (const model of order) {
     let search = opts.search
     for (let attempt = 0; attempt < 4; attempt += 1) {
@@ -113,6 +114,7 @@ async function askGemini(opts) {
       } catch (err) {
         lastErr = err
         if (err.status === 429) {
+          sawQuota = true
           const kind = quotaKind(err)
           if (kind === 'none') { unusable.set(model, Date.now() + 24 * HOUR); break }
           if (kind === 'daily') { unusable.set(model, Date.now() + 3 * HOUR); break }
@@ -128,7 +130,7 @@ async function askGemini(opts) {
       }
     }
   }
-  if (quotaOnly && lastErr) throw new QuotaError('The free Gemini limit is used up for now')
+  if ((quotaOnly || sawQuota) && lastErr) throw new QuotaError('The free Gemini limit is used up for now')
   throw lastErr || new QuotaError('No Gemini model is available right now')
 }
 
@@ -203,6 +205,7 @@ async function askGroq(opts) {
   const order = GROQ_MODELS.filter((m) => (unusable.get(`groq:${m}`) || 0) < Date.now())
   let lastErr
   let quotaOnly = true
+  let sawQuota = false // any model out of its limit: the job waits instead of failing
   for (const model of order) {
     for (let attempt = 0; attempt < 4; attempt += 1) {
       try {
@@ -210,6 +213,7 @@ async function askGroq(opts) {
       } catch (err) {
         lastErr = err
         if (err.status === 429) {
+          sawQuota = true
           // Per-day allowance used up: this model is done for a while.
           if (/per day|TPD|RPD|daily/i.test(err.body || '')) { unusable.set(`groq:${model}`, Date.now() + 3 * HOUR); break }
           // Per-minute: wait as long as Groq says (capped), then retry.
@@ -224,7 +228,7 @@ async function askGroq(opts) {
       }
     }
   }
-  if (quotaOnly && lastErr) throw new QuotaError('The free Groq limit is used up for now')
+  if ((quotaOnly || sawQuota) && lastErr) throw new QuotaError('The free Groq limit is used up for now')
   throw lastErr || new QuotaError('No Groq model is available right now')
 }
 

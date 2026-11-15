@@ -33,6 +33,7 @@ import readingSpaceRoutes from './routes/readingSpace.js'
 import studyToolsRoutes from './routes/studyTools.js'
 import { startBirthdayEmailLoop } from './services/birthdayEmails.js'
 import { startAiLibrary } from './services/aiLibrary.js'
+import { startFingerprintBackfill } from './services/duplicates.js'
 import shareLandingRoutes from './routes/shareLanding.js'
 import shareTokenRoutes from './routes/shareToken.js'
 import sitemapRoutes from './routes/sitemap.js'
@@ -243,4 +244,5 @@ app.listen(PORT, () => {
   startBirthdayEmailLoop()
   // Picks up AI lecture-note jobs left unfinished by a restart.
   startAiLibrary()
+  startFingerprintBackfill() // older books get a fingerprint, so re-uploads of them are caught
 })

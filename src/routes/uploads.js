@@ -10,6 +10,21 @@ import { analyzeResourceFile, lookupCourse } from '../services/aiAnalysis.js'
 import { detectCollectionAndSection } from '../utils/collectionDetector.js'
 import { findOrCreateAuthor } from '../services/authorLookup.js'
 import { uniqueTitle } from '../services/aiLibrary.js'
+import { fingerprint, findDuplicate } from '../services/duplicates.js'
+import { SITE_URL } from '../services/whatsappRequests.js'
+
+// The answer when the very same file is already in the library.
+function duplicateInfo(dup) {
+  return {
+    id: dup.id,
+    title: dup.title,
+    status: dup.status,
+    url: `${SITE_URL}/library/${dup.id}`,
+    message: dup.status === 'pending'
+      ? `This exact file has already been uploaded ("${dup.title}") and is waiting for review, so it can't be added again.`
+      : `This resource is already in the library as "${dup.title}", so it can't be added again.`,
+  }
+}
 
 const router = Router()
 
@@ -112,6 +127,16 @@ function resolveMediaSubtype(mimetype, rawValue) {
   return null
 }
 
+// GET /duplicate?sha=… — the browser fingerprints a chosen file itself and
+// asks here, so "this is already in the library" shows the moment a file is
+// picked, for every file type, without uploading it first.
+router.get('/duplicate', attachUser, requireAuth, async (req, res) => {
+  const sha = String(req.query.sha || '').toLowerCase()
+  if (!/^[0-9a-f]{64}$/.test(sha)) return res.status(400).json({ error: 'Bad fingerprint' })
+  const dupe = await findDuplicate(sha)
+  res.json({ duplicate: dupe ? duplicateInfo(dupe) : null })
+})
+
 // POST /analyze — takes one file, returns AI-suggested metadata. Writes
 // NOTHING to the database: this only ever backs the "AI analyzes → form
 // auto-fills → user edits → user submits" preview step. The real create
@@ -130,6 +155,10 @@ router.post(
     if (!uploadedFile) return res.status(400).json({ error: 'No file provided' })
 
     const { resourceTypeSlug } = req.body
+
+    // Already in the library? Say so straight away, before any AI work.
+    const dupe = await findDuplicate(fingerprint(uploadedFile.buffer))
+    if (dupe) return res.json({ suggestion: null, detected: null, duplicate: duplicateInfo(dupe) })
 
     const categoriesResult = await query('SELECT name FROM categories ORDER BY name ASC')
     const existingCategories = categoriesResult.rows.map((r) => r.name)
@@ -180,6 +209,14 @@ router.post(
     const uploadedThumbnail = req.files?.thumbnail?.[0]
 
     if (!uploadedFile) return res.status(400).json({ error: 'No file provided' })
+
+    // Never two copies of the same file (the analyze step already warned them).
+    const sha = fingerprint(uploadedFile.buffer)
+    const dupe = await findDuplicate(sha)
+    if (dupe) {
+      const info = duplicateInfo(dupe)
+      return res.status(409).json({ error: info.message, duplicate: info })
+    }
 
     const {
       title, author, courseCode, description, resourceTypeSlug,
@@ -266,8 +303,8 @@ router.post(
          storage_provider, file_id, file_url, file_name, file_type, file_size_bytes,
          width_px, height_px, aspect_ratio,
          uploaded_by, is_anonymous, thumbnail_status, media_subtype,
-         chapter, part, volume, edition, collection_id, author_id
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,'pending',$21,$22,$23,$24,$25,$26,$27)
+         chapter, part, volume, edition, collection_id, author_id, file_sha256
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,'pending',$21,$22,$23,$24,$25,$26,$27,$28)
        RETURNING id`,
       [
         finalTitle, finalAuthor, description || null, finalCourseCode,
@@ -275,7 +312,7 @@ router.post(
         stored.provider, stored.fileId, stored.fileUrl, uploadedFile.originalname, uploadedFile.mimetype, uploadedFile.size,
         basicMetadata.widthPx, basicMetadata.heightPx, basicMetadata.aspectRatio,
         req.user.id, anonymous, finalMediaSubtype,
-        chapter || null, part || null, volume || null, edition || null, finalCollectionId, authorId,
+        chapter || null, part || null, volume || null, edition || null, finalCollectionId, authorId, sha,
       ]
     )
 

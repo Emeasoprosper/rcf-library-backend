@@ -32,6 +32,7 @@ import {
   revisionPrompt,
 } from './noteGenerator.js'
 import { renderNotesPdf } from './notesPdf.js'
+import { fingerprint, fingerprintAll, findDuplicate } from './duplicates.js'
 import { isWhatsappRequest, queueReadyDm, SITE_URL } from './whatsappRequests.js'
 import { sendPushToUser } from '../routes/community.js'
 
@@ -193,7 +194,51 @@ async function existingNotes(code, title) {
      ORDER BY (r.ai_origin = 'generated') DESC NULLS LAST, r.created_at DESC LIMIT 1`,
     [key, String(title || '').slice(0, 80)]
   )
-  return result.rows[0] || null
+  if (result.rows[0] || key || !title) return result.rows[0] || null
+  // No code: compare titles loosely ("Intro to Accounting" = "Introduction to Accounting").
+  const want = titleKey(title)
+  if (!want) return null
+  const notes = await query(
+    `SELECT r.id, r.title FROM resources r JOIN resource_types t ON t.id = r.resource_type_id
+     WHERE r.status = 'approved' AND t.slug = 'lecture_notes'
+     ORDER BY (r.ai_origin = 'generated') DESC NULLS LAST, r.created_at DESC LIMIT 2000`
+  )
+  return notes.rows.find((r) => titleKey(r.title) === want) || null
+}
+
+// The same course written differently gets the same key: lower case, common
+// short forms spelled out, little words and "lecture notes" dropped.
+const SHORT_FORMS = {
+  intro: 'introduction', introd: 'introduction', princ: 'principles', principle: 'principles', prin: 'principles',
+  mgt: 'management', mgmt: 'management', mgmnt: 'management', acct: 'accounting', acc: 'accounting', accts: 'accounting',
+  econs: 'economics', eco: 'economics', bus: 'business', biz: 'business', maths: 'mathematics', math: 'mathematics',
+  stats: 'statistics', stat: 'statistics', fin: 'finance', mkt: 'marketing', mktg: 'marketing', ent: 'entrepreneurship',
+  comm: 'communication', comp: 'computer', sci: 'science', tech: 'technology', govt: 'government', hist: 'history',
+  gen: 'general', elem: 'elements', fund: 'fundamentals', fundamental: 'fundamentals', '&': 'and',
+}
+const LITTLE_WORDS = new Set(['of', 'to', 'the', 'and', 'in', 'a', 'an', 'for', 'on', 'lecture', 'lectures', 'note', 'notes', 'course', 'material', 'materials'])
+export function titleKey(title) {
+  return String(title || '')
+    .toLowerCase()
+    .replace(/\b[a-z]{3}\s?-?\d{3}\b/g, ' ')
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9 ]+/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((w) => SHORT_FORMS[w] || w)
+    .filter((w) => !LITTLE_WORDS.has(w))
+    .map((w) => (w.length > 4 ? w.replace(/s$/, '') : w)) // "principles" = "principle"
+    .join(' ')
+}
+
+// A request with no course code: if the course list has exactly one course
+// with this title, that's its code.
+async function codeFromTitle(title) {
+  const want = titleKey(title)
+  if (!want || want.length < 4) return ''
+  const result = await query(`SELECT code, title FROM courses WHERE title IS NOT NULL`).catch(() => ({ rows: [] }))
+  const hits = [...new Set(result.rows.filter((c) => titleKey(c.title) === want).map((c) => c.code))]
+  return hits.length === 1 ? hits[0] : ''
 }
 
 // Queues notes for a course (or joins an identical job already queued).
@@ -204,7 +249,7 @@ export async function requestLectureNotes({ courseCode, title, level, requestIds
   if (!force && !settings.aiLectureNotes) return { status: 'disabled' }
   if (!notesProvider()) return { status: 'unavailable' }
 
-  const code = normalizeCourseCode(courseCode)
+  let code = normalizeCourseCode(courseCode)
   let cleanTitle = String(title || '')
     .replace(LECTURE_NOTES_RE, '')
     // "ELEMENTS OF GOVERNMENT UNIT (2)" / "UNIT(3)" / "3 units": not part of the title
@@ -223,6 +268,7 @@ export async function requestLectureNotes({ courseCode, title, level, requestIds
     cleanTitle = cleanTitle.charAt(0).toUpperCase() + cleanTitle.slice(1)
   }
   if (!code && cleanTitle.length < 3) return { status: 'unavailable' }
+  if (!code) code = normalizeCourseCode(await codeFromTitle(cleanTitle)) || code
 
   if (!force) {
     const found = await existingNotes(code, cleanTitle)
@@ -232,7 +278,23 @@ export async function requestLectureNotes({ courseCode, title, level, requestIds
     }
   }
 
-  const key = code ? courseKey(code) : cleanTitle.toLowerCase()
+  const key = code ? courseKey(code) : `t:${titleKey(cleanTitle) || cleanTitle.toLowerCase()}`
+  // Two people asking for the same course at the same moment: the second
+  // waits for the first to finish queuing, then joins that same job.
+  return withCourseLock(key, () => queueNotesJob({ key, code, cleanTitle, level, requestIds, requestedBy }))
+}
+
+const courseLocks = new Map()
+function withCourseLock(key, fn) {
+  const prev = courseLocks.get(key) || Promise.resolve()
+  const run = prev.catch(() => {}).then(fn)
+  const tail = run.catch(() => {})
+  courseLocks.set(key, tail)
+  tail.then(() => courseLocks.get(key) === tail && courseLocks.delete(key))
+  return run
+}
+
+async function queueNotesJob({ key, code, cleanTitle, level, requestIds, requestedBy }) {
   const active = await query(
     `UPDATE ai_jobs SET request_ids = (SELECT array_agg(DISTINCT x) FROM unnest(request_ids || $2::uuid[]) x)
      WHERE kind = 'lecture_notes' AND course_key = $1 AND status IN ('queued', 'running')
@@ -309,6 +371,8 @@ export function tidyCourseTitle(raw) {
     .replace(/\(?\b\d+\s*units?\b\)?|\bunits?\s*\(?\s*\d+\s*\)?/gi, ' ')
     .replace(/\b[A-Za-z]{3}\s?-?\d{3}\b/g, ' ')
     .replace(/\blecture\s*notes?\b/gi, ' ')
+    .replace(/\s*\/\s*/g, ' / ')
+    .replace(/[\s(]*\bunits?\b[\s)]*$/i, ' ') // a bare "Unit" left at the end
     .replace(/^[\s,;:–-]+|[\s,;:–-]+$/g, '')
     .replace(/\s+/g, ' ')
     .trim()
@@ -751,24 +815,27 @@ export async function publishBotUpload({ files, caption = '', courseCode, type, 
   await ensureAiTables()
   const settings = await getBotSettings()
   const images = files.filter((f) => f.mimetype?.startsWith('image/'))
+  const allImages = images.length > 0 && images.length === files.length
+
+  // The very same file (or set of photos) already in the library: point to
+  // it, before spending any AI on it. Photos are fingerprinted themselves,
+  // since the PDF made from them is different every time.
+  const mainFile = allImages ? null : files.find((x) => !x.mimetype?.startsWith('image/')) || files[0]
+  const sha = allImages ? fingerprintAll(images.map((x) => x.buffer)) : fingerprint(mainFile.buffer)
+  const dup = await findDuplicate(sha)
+  if (dup) return { status: 'duplicate', resourceId: dup.id, title: dup.title, url: `${SITE_URL}/library/${dup.id}`, fulfilled: 0 }
 
   const check = await classifyMaterial({ files, caption: `${caption} ${files.map((x) => x.originalname || '').join(' ')}` })
   if (check.verdict === 'not_material' && !confirmed) return { status: 'not_material', reason: check.reason }
   const checkable = images.length > 0 || files.some((x) => x.mimetype === 'application/pdf')
   if (check.verdict === 'unknown' && checkable && !confirmed) return { status: 'unverified', reason: check.reason }
   let file
-  if (images.length && images.length === files.length) {
+  if (allImages) {
     const buffer = await imagesToPdf(images)
     file = { buffer, mimetype: 'application/pdf', originalname: 'whatsapp-upload.pdf', size: buffer.length }
   } else {
-    const f = files.find((x) => !x.mimetype?.startsWith('image/')) || files[0]
-    file = { ...f, size: f.buffer.length }
+    file = { ...mainFile, size: mainFile.buffer.length }
   }
-
-  // The very same file sent twice (common in groups) is only added once.
-  const sha = crypto.createHash('sha256').update(file.buffer).digest('hex')
-  const dup = await query(`SELECT id, title FROM resources WHERE file_sha256 = $1 AND status <> 'rejected' LIMIT 1`, [sha])
-  if (dup.rows.length) return { status: 'duplicate', resourceId: dup.rows[0].id, title: dup.rows[0].title, url: `${SITE_URL}/library/${dup.rows[0].id}`, fulfilled: 0 }
 
   const hint = `${caption} ${file.originalname || ''}`
   const aiType = ['past_question', 'lecture_notes', 'book'].includes(check.type) ? check.type : check.type === 'handout' ? 'lecture_notes' : null

@@ -13,6 +13,7 @@ import { getBotSettings, cleanBotSettings } from '../services/botSettings.js'
 import { ensureGroupSettingsColumn, cleanGroupSettings, withGroupDefaults } from '../services/groupSettings.js'
 import { ensureChatLogTables, chatLogUsage } from '../services/botChatLog.js'
 import { isWhatsappRequest, queueReadyDm } from '../services/whatsappRequests.js'
+import { score as fuzzyScore, SIMILAR_ENOUGH } from '../services/fuzzySearch.js'
 import { ensureReviewColumns } from '../services/appReviews.js'
 import { ensureAiTables, requestLectureNotes, retryAllFailed, retryJob, workerStatus } from '../services/aiLibrary.js'
 import { notesProvider } from '../services/noteGenerator.js'
@@ -328,9 +329,35 @@ router.patch('/uploads/:id/reject', async (req, res) => {
 // GET /admin/resources?status=approved&search=&page= — now includes who
 // reviewed each item, so approved/rejected history shows accountability.
 router.get('/resources', async (req, res) => {
-  const { status = 'approved', search = '', page = 1, pageSize = 15 } = req.query
+  const { status = 'approved', search = '', page = 1, pageSize = 15, fuzzy } = req.query
   const limit = Math.min(Number(pageSize) || 15, 50)
   const offset = (Math.max(Number(page) || 1, 1) - 1) * limit
+
+  // fuzzy=1 (the requests page): spelling doesn't have to be exact. Exact
+  // matches come first (marked match: 'exact'), then close ones ('similar').
+  if (fuzzy && String(search).trim().length >= 2) {
+    const all = await query(
+      `SELECT r.id, r.title, r.author, r.course_code FROM resources r WHERE r.status = $1 ORDER BY r.created_at DESC LIMIT 5000`,
+      [status]
+    )
+    let ranked = all.rows
+      .map((r) => ({ id: r.id, s: Math.max(fuzzyScore(search, `${r.title} ${r.course_code || ''}`), fuzzyScore(search, r.author || '') * 0.9) }))
+      .filter((r) => r.s >= SIMILAR_ENOUGH)
+      .sort((a, b) => b.s - a.s)
+    // Typed it exactly: just those. Otherwise: the closest names to choose from.
+    if (ranked.some((r) => r.s >= 1)) ranked = ranked.filter((r) => r.s >= 1)
+    ranked = ranked.slice(0, limit)
+    if (!ranked.length) return res.json({ items: [] })
+    const rows = await query(
+      `SELECT r.id, r.title, r.author, r.thumbnail_url, r.file_type, r.file_size_bytes, r.status, r.created_at, r.course_code
+       FROM resources r WHERE r.id = ANY($1::uuid[])`,
+      [ranked.map((r) => r.id)]
+    )
+    const byId = new Map(rows.rows.map((r) => [r.id, r]))
+    return res.json({
+      items: ranked.filter((r) => byId.has(r.id)).map((r) => ({ ...byId.get(r.id), match: r.s >= 1 ? 'exact' : 'similar' })),
+    })
+  }
 
   const result = await query(
     `SELECT r.id, r.title, r.author, r.thumbnail_url, r.file_type, r.file_size_bytes,
