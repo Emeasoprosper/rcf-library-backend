@@ -436,7 +436,13 @@ async function runJob(job) {
       }
     )
     // Taken back for being too slow (another run owns it now): don't publish twice.
-    const still = await query(`SELECT 1 FROM ai_jobs WHERE id = $1 AND status = 'running' AND started_at = $2`, [job.id, job.started_at])
+    // The database keeps microseconds but job.started_at (a JS Date) only
+    // milliseconds, so an exact "=" never matched and nothing was published.
+    const still = await query(
+      `SELECT 1 FROM ai_jobs WHERE id = $1 AND status = 'running'
+         AND abs(extract(epoch FROM (started_at - $2::timestamptz))) < 0.001`,
+      [job.id, job.started_at]
+    )
     if (!still.rows.length) return
     progress(96, 'Publishing to the library')
     await finishNotes(job, notes)
