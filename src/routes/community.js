@@ -18,10 +18,14 @@ const router = Router()
 // GET /community/notifications — used by Home.jsx via communityApi.notifications()
 router.get('/notifications', attachUser, requireAuth, async (req, res) => {
   const result = await query(
-    `SELECT id, type, title, body, link_to, thumbnail_url, resource_id, is_read, created_at
-     FROM notifications
-     WHERE user_id = $1
-     ORDER BY created_at DESC
+    // The linked book's current cover wins over the copy saved with the
+    // notification (covers are made after upload, and hosts can change).
+    `SELECT n.id, n.type, n.title, n.body, n.link_to, COALESCE(r.thumbnail_url, n.thumbnail_url) AS thumbnail_url,
+            n.resource_id, n.is_read, n.created_at
+     FROM notifications n
+     LEFT JOIN resources r ON r.id = n.resource_id
+     WHERE n.user_id = $1
+     ORDER BY n.created_at DESC
      LIMIT 50`,
     [req.user.id]
   )

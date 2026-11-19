@@ -134,13 +134,16 @@ async function typeId(slug) {
   return (await query(`SELECT id FROM resource_types WHERE slug = 'other'`)).rows[0]?.id
 }
 
-async function notifyAdmins({ title, body, url, type }) {
+// resourceId links the notification to its book, so the app shows that
+// book's cover (looked up when the list is read, so it's always current).
+async function notifyAdmins({ title, body, url, type, resourceId = null, thumbnailUrl = null }) {
   const admins = await query(`SELECT id FROM users WHERE role IN ('admin', 'superadmin') AND is_suspended = false`)
   const ids = admins.rows.map((r) => r.id)
   if (!ids.length) return
   await query(
-    `INSERT INTO notifications (user_id, type, title, body, link_to) SELECT unnest($1::uuid[]), $2, $3, $4, $5`,
-    [ids, type, title, body, url]
+    `INSERT INTO notifications (user_id, type, title, body, link_to, resource_id, thumbnail_url)
+     SELECT unnest($1::uuid[]), $2, $3, $4, $5, $6, $7`,
+    [ids, type, title, body, url, resourceId, thumbnailUrl]
   )
   await sendPush({ category: 'updates', userIds: ids, title, body, url, tag: `${type}-${Date.now()}` }).catch(() => {})
 }
@@ -411,6 +414,8 @@ async function finishNotes(job, notes) {
   await notifyAdmins({
     type: 'ai_notes',
     title: `✍️ AI wrote lecture notes: ${resource.title}`,
+    resourceId: resource.id,
+    thumbnailUrl: resource.thumbnail_url || null,
     body: `${notes.chapters.length} weeks, ${Math.round(pdf.length / 1024)} KB.${published ? ' Live in the library.' : ' Waiting for your review.'}${fulfilled ? ` Sent to ${fulfilled} ${fulfilled === 1 ? 'person' : 'people'} who asked.` : ''}`,
     url: '/admin/ai-library',
   })
@@ -924,6 +929,8 @@ export async function publishBotUpload({ files, caption = '', courseCode, type, 
   await notifyAdmins({
     type: 'bot_upload',
     title: `📥 Bro Paul added: ${resource.title}`,
+    resourceId: resource.id,
+    thumbnailUrl: resource.thumbnail_url || null,
     body: `Sent on WhatsApp by ${whatsappName || 'a member'}${groupName ? ` in ${groupName}` : ''}.${status === 'approved' ? ' Live in the library.' : ' Waiting for your review.'}${fulfilled ? ` Fulfilled ${fulfilled} request${fulfilled === 1 ? '' : 's'}.` : ''}`,
     url: '/admin/ai-library',
   }).catch(() => {})
