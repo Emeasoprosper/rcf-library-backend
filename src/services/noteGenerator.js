@@ -34,11 +34,18 @@ const GROQ_MODELS = (process.env.NOTES_GROQ_MODELS || 'openai/gpt-oss-120b,llama
   .map((m) => m.trim())
   .filter(Boolean)
 
+// Order: Claude (paid) if set; otherwise Groq first when it has a key (far
+// faster than Gemini's small free allowance, which only manages about one
+// course a day), with Gemini as the backup. NOTES_PROVIDER=gemini puts
+// Gemini first again.
+const GEMINI_FIRST = process.env.NOTES_PROVIDER === 'gemini'
+
 export function notesProvider() {
-  const backups = GROQ_API_KEY ? ['groq'] : []
   if (process.env.ANTHROPIC_API_KEY) return { name: 'claude', model: CLAUDE_MODEL, backups: [] }
-  if (GEMINI_API_KEY) return { name: 'gemini', model: workingGemini.default || GEMINI_CANDIDATES[0], backups }
-  if (GROQ_API_KEY) return { name: 'groq', model: GROQ_MODELS[0], backups: [] }
+  if (GROQ_API_KEY && !(GEMINI_FIRST && GEMINI_API_KEY)) {
+    return { name: 'groq', model: GROQ_MODELS[0], backups: GEMINI_API_KEY ? ['gemini'] : [] }
+  }
+  if (GEMINI_API_KEY) return { name: 'gemini', model: workingGemini.default || GEMINI_CANDIDATES[0], backups: GROQ_API_KEY ? ['groq'] : [] }
   return null
 }
 
@@ -247,7 +254,15 @@ async function askAny(opts) {
   const provider = notesProvider()
   if (!provider) throw new Error('No AI key configured (set GEMINI_API_KEY or GROQ_API_KEY, or ANTHROPIC_API_KEY for Claude)')
   if (provider.name === 'claude') return askClaude(opts)
-  if (provider.name === 'groq') return askGroq(opts)
+  if (provider.name === 'groq') {
+    try {
+      return await askGroq(opts)
+    } catch (err) {
+      if (err.code !== 'QUOTA' || !GEMINI_API_KEY) throw err
+      console.warn('Groq free limit reached; writing with the Gemini backup.')
+      return askGemini(opts)
+    }
+  }
   try {
     return await askGemini(opts)
   } catch (err) {
