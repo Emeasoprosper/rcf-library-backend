@@ -15,7 +15,7 @@
 import json, os, re, subprocess, sys, time
 print("Starting the RCF notes AI… (step 1 of 3: installing)", flush=True)
 
-API ="https://rcf-library-backend.onrender.com/api/ai-worker"
+API ="https://rcf-library-backend-b3g4.onrender.com/api/ai-worker"
 MODEL = os.environ.get("NOTES_MODEL", "qwen3:14b")   # strong + fits one T4 GPU
 RUN_HOURS = 11.7                                      # Kaggle kills a session at exactly 12h
 JOB_MINUTES = 80                                      # one course takes ~70 min on a T4
